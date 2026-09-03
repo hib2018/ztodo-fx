@@ -53,3 +53,10 @@ test "Unicode round trip and invalid JSON" {
     try std.testing.expectEqualStrings("日本語", restored.tasks.items[0].title);
     try std.testing.expectError(error.InvalidJson, decode(std.testing.allocator, "{"));
 }
+test "schema and size limits reject without adopting data" {
+    try std.testing.expectError(error.InvalidState, decode(std.testing.allocator, "{\"schema_version\":2,\"next_task_id\":1,\"tasks\":[]}"));
+    const huge = try std.testing.allocator.alloc(u8, max_file_size + 1);
+    defer std.testing.allocator.free(huge);
+    @memset(huge, ' ');
+    try std.testing.expectError(error.FileTooLarge, decode(std.testing.allocator, huge));
+}

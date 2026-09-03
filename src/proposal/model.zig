@@ -67,3 +67,13 @@ test "proposal rejects duplicate and cycles" {
     const base = Proposal{ .issue_key = .{ .repository = "a/b", .issue_number = 1 }, .issue_title = "i", .summary = "s", .candidates = &.{.{ .candidate_id = "a", .title = "x", .parent_candidate_id = "a", .position = 0 }}, .generation = .{ .generated_at = 1, .fx_version = "1", .attempt_count = 1 }, .updated_at = 1 };
     try std.testing.expectError(error.Cycle, validate(base));
 }
+test "proposal candidate count duplicate title and missing parent are rejected" {
+    const empty = Proposal{ .issue_key = .{ .repository = "a/b", .issue_number = 1 }, .issue_title = "i", .summary = "s", .candidates = &.{}, .generation = .{ .generated_at = 1, .fx_version = "1", .attempt_count = 1 }, .updated_at = 1 };
+    try std.testing.expectError(error.InvalidCandidateCount, validate(empty));
+    var duplicate = empty;
+    duplicate.candidates = &.{ .{ .candidate_id = "a", .title = "same", .position = 0 }, .{ .candidate_id = "b", .title = "same", .position = 1 } };
+    try std.testing.expectError(error.DuplicateTitle, validate(duplicate));
+    var missing = empty;
+    missing.candidates = &.{.{ .candidate_id = "a", .title = "x", .parent_candidate_id = "missing", .position = 0 }};
+    try std.testing.expectError(error.MissingParent, validate(missing));
+}

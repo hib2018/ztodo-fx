@@ -52,7 +52,7 @@ description: "Implementation tasks for the fx-integrated task management core"
 - [ ] T014 [P] schema version、16 MiB上限、Unicode round trip、不正JSON、sync/replace失敗時の既存保持テストを書く `src/core/store.zig`
 - [X] T015 `state.json`のdecode/encode/load/Atomic saveを実装してT014を通す `src/core/store.zig`
 - [ ] T016 [P] Repositoryと絶対Workspaceの一対一制約、20件上限、除外pattern、Atomic config保存のテストを書く `src/integrations/github/config.zig`
-- [ ] T017 RepositoryConfig model、検証、load/save、add/set/delete/exclude操作を実装してT016を通す `src/integrations/github/config.zig`
+- [X] T017 RepositoryConfig model、検証、load/save、add/set/delete/exclude操作を実装してT016を通す `src/integrations/github/config.zig`
 - [X] T018 [P] 小文字`y`／`--yes`だけを確定とする確認、利用者向けerror分類、stdout/stderr分離のテストを書く `src/cli.zig`
 - [X] T019 CLI共通confirmation、error mapping、path付き復旧messageを実装してT018を通す `src/cli.zig`
 
@@ -79,11 +79,11 @@ Task treeへAtomicに追加できる。
 - [X] T026 [US1] Proposal、CandidateTask、GenerationMetadataの所有権・検証・JSON decodeを実装してT020を通す `src/proposal/model.zig`
 - [X] T027 [P] [US1] fx envelope parserとProposal byte抽出を実装してT021を通す `src/integrations/fx/response.zig`
 - [X] T028 [P] [US1] 実効fx権限の事前診断とunsafe ruleのtyped errorを実装してT022を通す `src/integrations/fx/permissions.zig`
-- [ ] T029 [P] [US1] 除外済みprivate一時Workspaceの作成、read-only化、安全なowned-root cleanupを実装してT023を通す `src/platform/snapshot.zig`
+- [X] T029 [P] [US1] 除外済みprivate一時Workspaceの作成、read-only化、安全なowned-root cleanupを実装してT023を通す `src/platform/snapshot.zig`
 - [X] T030 [P] [US1] Proposal専用prompt builderを実装してT024を通す `src/integrations/fx/prompt.zig`
 - [X] T031 [US1] stdin非対話実行、16 MiB上限、10分deadline、最大2回の限定retry、認証・互換性errorを実装してT025を通す `src/integrations/fx/client.zig`
 - [ ] T032 [P] [US1] add/edit/delete/move/reparent、保存選択、中断時rollbackのProposal editor状態遷移テストを書く `src/proposal/editor.zig`
-- [ ] T033 [US1] Proposal editorの純粋な状態操作を実装してT032を通す `src/proposal/editor.zig`
+- [X] T033 [US1] Proposal editorの純粋な状態操作を実装してT032を通す `src/proposal/editor.zig`
 - [ ] T034 [P] [US1] 既存同一Issue Taskとの完全一致警告、二重確認、append順、Task ID採番、State保存失敗rollbackのテストを書く `src/proposal/apply.zig`
 - [X] T035 [US1] Proposal全候補のTask tree変換、重複警告、同じState copy内のTask追加＋Proposal削除を実装してT034を通す `src/proposal/apply.zig`
 - [ ] T036 [P] [US1] 生成precondition、既存Proposal置換確認、各Issue一Draft、失敗・中断時State不変、snapshot cleanupのworkflowテストを書く `src/proposal/generator.zig`
@@ -107,7 +107,7 @@ Stateを表示し、所属、階層、兄弟順、完了状態を2秒以内に�
 
 - [ ] T041 [P] [US2] Issue root、Unlinked root、preorder traversal、兄弟position、深い階層、欠損禁止のtree projectionテストを書く `src/core/tree.zig`
 - [ ] T042 [P] [US2] Unicode枝、完了marker、Issue状態、絞込み、200 Task・10階層性能のrendererテストを書く `src/cli/tree_renderer.zig`
-- [ ] T043 [US2] Stateから安定したIssue/Task tree projectionを構築する処理を実装してT041を通す `src/core/tree.zig`
+- [X] T043 [US2] Stateから安定したIssue/Task tree projectionを構築する処理を実装してT041を通す `src/core/tree.zig`
 - [X] T044 [US2] human-readable tree rendererとIssue状態labelを実装してT042を通す `src/cli/tree_renderer.zig`
 - [ ] T045 [P] [US2] `task ls [--issue]`の空状態、全root、Issue filter、非Open Issue表示のCLIテストを書く `src/cli.zig`
 - [X] T046 [US2] `task ls`をcore tree projectionへ接続してT045を通す `src/cli.zig`
@@ -150,7 +150,7 @@ Stateを表示し、所属、階層、兄弟順、完了状態を2秒以内に�
 - [ ] T055 [P] [US4] `gh issue list/view --json`のargv、上限、認証・権限・network・not-found分類、JSON ownershipの契約テストを書く `src/integrations/github/client.zig`
 - [ ] T056 [P] [US4] Open/closed/deleted/unavailable遷移、最終title/body保持、重複Issue mergeのテストを書く `src/integrations/github/issue.zig`
 - [X] T057 [US4] shellなしgh adapter、Open Issue list、既知Issue refresh、typed errorを実装してT055を通す `src/integrations/github/client.zig`
-- [ ] T058 [US4] GitHub結果をIssueSnapshotへmergeし、失敗時にTask linkを保つ処理を実装してT056を通す `src/integrations/github/issue.zig`
+- [X] T058 [US4] GitHub結果をIssueSnapshotへmergeし、失敗時にTask linkを保つ処理を実装してT056を通す `src/integrations/github/issue.zig`
 - [ ] T059 [P] [US4] `repo add/ls/set-workspace/del/exclude`と`issue ls/refresh/show/open`のCLI契約テストを書く `src/cli.zig`
 - [X] T060 [US4] Repository/Workspace管理とIssue command群をConfig、GitHub adapter、Stateへ接続してT059を通す `src/cli.zig`
 - [ ] T061 [US4] 偽ghによるRepository登録→refresh→障害→snapshot継続のend-to-end testを追加する `src/root.zig`
@@ -170,7 +170,7 @@ Stateを表示し、所属、階層、兄弟順、完了状態を2秒以内に�
 - [X] T066 [P] XDG保存先、override、schema、上限、標準/custom除外、旧ztodo非移行を記載する `docs/configuration.md`
 - [X] T067 [P] gh/fx/unsafe permission/timeout/invalid output/破損Stateの復旧手順を書く `docs/troubleshooting.md`
 - [X] T068 [P] プロジェクト概要、必要環境、quick start、詳細docs linkを更新する `README.md`
-- [ ] T069 CLI契約の全command、option、Task ID候補をZsh補完へ反映する `extras/zsh/completions/_ztodo-fx`
+- [X] T069 CLI契約の全command、option、Task ID候補をZsh補完へ反映する `extras/zsh/completions/_ztodo-fx`
 - [ ] T070 [P] prompt、response、credential、Issue bodyを通常log/errorへ出さないこととsnapshot escapeを検証するsecurity回帰テストを追加する `src/root.zig`
 - [X] T071 `src/root.zig`へ全module test importを集約し、未登録moduleがないことを確認する `src/root.zig`
 - [X] T072 `zig fmt --check build.zig src`、`zig build test`、`zig build`を実行し結果を記録する `specs/001-integrate-fx-proposals/quickstart.md`

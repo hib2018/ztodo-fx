@@ -14,3 +14,9 @@ test "prompt marks untrusted input and read-only policy" {
     try std.testing.expect(std.mem.indexOf(u8, p, "untrusted") != null);
     try std.testing.expect(std.mem.indexOf(u8, p, "Do not modify") != null);
 }
+test "prompt does not add credential diagnostics" {
+    const p = try build(std.testing.allocator, .{ .key = .{ .repository = "a/b", .issue_number = 2 }, .title = "x", .body = "ordinary" });
+    defer std.testing.allocator.free(p);
+    try std.testing.expect(std.mem.indexOf(u8, p, "FX_TOKEN") == null);
+    try std.testing.expect(std.mem.indexOf(u8, p, "Return JSON only") != null);
+}

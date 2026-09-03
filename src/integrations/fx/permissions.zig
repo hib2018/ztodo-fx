@@ -40,3 +40,11 @@ pub fn preflight(a: std.mem.Allocator, io: std.Io, env: *const std.process.Envir
 test "terminal allow is rejected" {
     try std.testing.expectError(error.UnsafePermission, validateJson(std.testing.allocator, "{\"rules\":[{\"action\":\"allow\",\"tool\":\"Terminal\"}]}", "/tmp/w"));
 }
+test "write upload and external paths are rejected" {
+    for ([_][]const u8{ "write", "upload" }) |tool| {
+        const json = try std.fmt.allocPrint(std.testing.allocator, "{{\"action\":\"allow\",\"tool\":\"{s}\"}}", .{tool});
+        defer std.testing.allocator.free(json);
+        try std.testing.expectError(error.UnsafePermission, validateJson(std.testing.allocator, json, "/tmp/work"));
+    }
+    try std.testing.expectError(error.UnsafePermission, validateJson(std.testing.allocator, "{\"action\":\"allow\",\"path\":\"/etc\"}", "/tmp/work"));
+}

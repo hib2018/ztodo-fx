@@ -28,3 +28,10 @@ test "envelope permits unknown fields and strips fence" {
 test "no-save rejects a persisted session" {
     try std.testing.expectError(error.UnexpectedSession, proposalBytes(std.testing.allocator, "{\"final_output\":\"{}\",\"session_id\":\"persisted-session\"}"));
 }
+test "empty output invalid JSON and output limit are rejected" {
+    try std.testing.expectError(error.EmptyFinalOutput, proposalBytes(std.testing.allocator, "{\"final_output\":\"\",\"session_id\":\"\"}"));
+    try std.testing.expectError(error.InvalidEnvelope, proposalBytes(std.testing.allocator, "not-json"));
+    const huge = try std.testing.allocator.alloc(u8, 16 * 1024 * 1024 + 1);
+    defer std.testing.allocator.free(huge);
+    try std.testing.expectError(error.OutputTooLarge, proposalBytes(std.testing.allocator, huge));
+}

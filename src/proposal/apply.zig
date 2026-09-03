@@ -41,3 +41,16 @@ test "approval preserves parent relationship and removes proposal" {
     try std.testing.expectEqual(@as(usize, 2), try apply(&s, p.issue_key));
     try std.testing.expectEqual(@as(?u64, 1), s.tasks.items[1].parent_id);
 }
+test "duplicate warnings are scoped to the same issue" {
+    var s = state_mod.StateRoot.init(std.testing.allocator);
+    defer s.deinit();
+    for ([_]task.IssueKey{ .{ .repository = "a/b", .issue_number = 1 }, .{ .repository = "a/b", .issue_number = 2 } }) |key| try s.issues.append(std.testing.allocator, .{ .key = .{ .repository = try std.testing.allocator.dupe(u8, key.repository), .issue_number = key.issue_number }, .title = try std.testing.allocator.dupe(u8, "i"), .body = try std.testing.allocator.dupe(u8, "") });
+    _ = try s.addTask("same", .{ .repository = "a/b", .issue_number = 1 }, null);
+    _ = try s.addTask("same", .{ .repository = "a/b", .issue_number = 2 }, null);
+    const p = @import("model.zig").Proposal{ .issue_key = .{ .repository = "a/b", .issue_number = 1 }, .issue_title = "i", .summary = "s", .candidates = &.{.{ .candidate_id = "a", .title = "same", .position = 0 }}, .generation = .{ .generated_at = 1, .fx_version = "1", .attempt_count = 1 }, .updated_at = 1 };
+    try s.putProposal(p);
+    const warnings = try duplicates(std.testing.allocator, &s, p.issue_key);
+    defer std.testing.allocator.free(warnings);
+    try std.testing.expectEqual(@as(usize, 1), warnings.len);
+    try std.testing.expectEqual(@as(u64, 1), warnings[0].existing_task_id);
+}

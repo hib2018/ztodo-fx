@@ -1,14 +1,20 @@
 const std = @import("std");
 const state = @import("../core/state.zig");
 pub fn render(allocator: std.mem.Allocator, s: *const state.StateRoot) ![]u8 {
+    return renderFiltered(allocator, s, null);
+}
+pub fn renderFiltered(allocator: std.mem.Allocator, s: *const state.StateRoot, filter: ?@import("../core/task.zig").IssueKey) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     for (s.issues.items) |issue| {
+        if (filter) |key| if (!issue.key.eql(key)) continue;
         try out.writer.print("{s}#{d} [{s}] {s}\n", .{ issue.key.repository, issue.key.issue_number, @tagName(issue.status), issue.title });
         try renderChildren(&out.writer, s, issue.key, null, 1);
     }
-    try out.writer.writeAll("Unlinked\n");
-    try renderChildren(&out.writer, s, null, null, 1);
+    if (filter == null) {
+        try out.writer.writeAll("Unlinked\n");
+        try renderChildren(&out.writer, s, null, null, 1);
+    }
     return out.toOwnedSlice();
 }
 

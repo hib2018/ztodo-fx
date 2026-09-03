@@ -2,7 +2,7 @@ const std = @import("std");
 const process = @import("../../platform/process.zig");
 pub const RemoteIssue = struct { number: u64, title: []const u8, body: []const u8 = "", state: []const u8 };
 pub fn list(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, repository: []const u8) !std.json.Parsed([]RemoteIssue) {
-    const result = try process.run(a, io, .{ .argv = &.{ "gh", "issue", "list", "--repo", repository, "--state", "all", "--limit", "100", "--json", "number,title,body,state" }, .env_map = env });
+    const result = try process.run(a, io, .{ .argv = &.{ "gh", "issue", "list", "--repo", repository, "--state", "all", "--limit", "10000", "--json", "number,title,body,state" }, .env_map = env });
     defer result.deinit(a);
     if (!process.successful(result.term)) {
         if (std.mem.indexOf(u8, result.stderr, "auth") != null) return error.AuthenticationRequired;

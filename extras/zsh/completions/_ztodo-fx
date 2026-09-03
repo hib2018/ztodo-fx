@@ -1,7 +1,35 @@
 #compdef ztodo-fx
-local -a commands
-commands=(help version doctor task repo issue proposal)
-_arguments \
-  '1:command:(${commands})' \
-  '2:action:(ls add edit toggle move reparent link unlink del clear set-workspace exclude refresh show open generate discard approve)' \
-  '*:argument:_files'
+
+local context state line
+typeset -A opt_args
+
+_arguments -C \
+  '1:command:(help version doctor task repo issue proposal)' \
+  '*::argument:->args'
+
+case $words[2] in
+  task)
+    _arguments -C \
+      '2:action:(ls add edit toggle move reparent link unlink del clear)' \
+      '3:task-id:_message "Task ID"' \
+      '*:option:(--issue --parent --root --promote-children --subtree --yes)'
+    ;;
+  repo)
+    _arguments -C \
+      '2:action:(add ls set-workspace del exclude)' \
+      '3:repository:_message "owner/name"' \
+      '4:workspace:_directories' \
+      '*:option:(--yes)'
+    ;;
+  issue)
+    _arguments -C \
+      '2:action:(ls refresh show open)' \
+      '3:issue:_message "owner/name#number"'
+    ;;
+  proposal)
+    _arguments -C \
+      '2:action:(generate show edit discard approve)' \
+      '3:issue:_message "owner/name#number"' \
+      '*:option:(--yes)'
+    ;;
+esac

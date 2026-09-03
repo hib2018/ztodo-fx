@@ -119,6 +119,12 @@ pub const StateRoot = struct {
         self.normalizePositions();
         return removed;
     }
+    pub fn subtreeCount(self: *StateRoot, id: u64) !usize {
+        var ids: std.ArrayList(u64) = .empty;
+        defer ids.deinit(self.allocator);
+        try self.collectSubtree(id, &ids);
+        return ids.items.len;
+    }
     fn collectSubtree(self: *StateRoot, id: u64, ids: *std.ArrayList(u64)) !void {
         try ids.append(self.allocator, id);
         for (self.tasks.items) |t| if (t.parent_id == id) try self.collectSubtree(t.id, ids);
@@ -279,4 +285,48 @@ test "state detects cycle and assigns ids" {
     try s.validate();
     s.findTask(a).?.parent_id = 2;
     try std.testing.expectError(error.Cycle, s.validate());
+}
+test "state rejects missing parent duplicate id and broken positions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var s = StateRoot.init(arena.allocator());
+    try s.tasks.append(arena.allocator(), .{ .id = 1, .title = "x", .parent_id = 99, .position = 0 });
+    s.next_task_id = 2;
+    try std.testing.expectError(error.ParentNotFound, s.validate());
+    s.tasks.items[0].parent_id = null;
+    try s.tasks.append(arena.allocator(), .{ .id = 1, .title = "y", .position = 1 });
+    try std.testing.expectError(error.DuplicateTaskId, s.validate());
+    s.tasks.items[1].id = 2;
+    s.next_task_id = 3;
+    s.tasks.items[1].position = 2;
+    try std.testing.expectError(error.InvalidPosition, s.validate());
+}
+test "manual operations preserve subtree issue and reject cycles" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var s = StateRoot.init(arena.allocator());
+    try s.issues.append(arena.allocator(), .{ .key = .{ .repository = "a/b", .issue_number = 1 }, .title = "issue" });
+    const root = try s.addTask("root", null, null);
+    const child = try s.addTask("child", null, root);
+    try s.reparent(root, null, .{ .repository = "a/b", .issue_number = 1 });
+    try std.testing.expect(s.findTask(child).?.issue_key.?.eql(.{ .repository = "a/b", .issue_number = 1 }));
+    try std.testing.expectError(error.Cycle, s.reparent(root, child, null));
+    _ = try s.toggle(root);
+    try std.testing.expectEqual(task_mod.Status.todo, s.findTask(child).?.status);
+}
+test "promote and subtree deletion keep remaining positions contiguous" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var s = StateRoot.init(arena.allocator());
+    defer s.deinit();
+    const root = try s.addTask("root", null, null);
+    _ = try s.addTask("before", null, null);
+    _ = try s.addTask("child-a", null, root);
+    _ = try s.addTask("child-b", null, root);
+    try s.deletePromote(root);
+    try s.validate();
+    try std.testing.expectEqual(@as(usize, 3), s.tasks.items.len);
+    try std.testing.expectEqual(@as(usize, 1), try s.deleteSubtree(2));
+    try s.validate();
+    try std.testing.expectEqual(@as(usize, 2), s.tasks.items.len);
 }

@@ -65,6 +65,11 @@ fn validateName(name: []const u8) !void {
     const slash = std.mem.indexOfScalar(u8, name, '/') orelse return error.InvalidRepository;
     if (slash == 0 or slash + 1 == name.len) return error.InvalidRepository;
 }
+pub fn validateWorkspace(io: std.Io, path: []const u8) !void {
+    if (!std.fs.path.isAbsolute(path)) return error.WorkspaceMustBeAbsolute;
+    const dir = std.Io.Dir.openDirAbsolute(io, path, .{}) catch return error.WorkspaceUnavailable;
+    dir.close(io);
+}
 fn freeRepo(a: std.mem.Allocator, r: Repository) void {
     a.free(r.repository);
     a.free(r.workspace_path);
@@ -109,4 +114,22 @@ test "repository and workspace are one-to-one" {
     defer c.deinit();
     try c.add("a/b", "/tmp/a");
     try std.testing.expectError(error.WorkspaceAlreadyMapped, c.add("c/d", "/tmp/a"));
+}
+test "config enforces limit and exclusion round trips" {
+    var c = Config.init(std.testing.allocator);
+    defer c.deinit();
+    var names: [20][16]u8 = undefined;
+    var paths: [20][32]u8 = undefined;
+    for (0..20) |i| {
+        const name = try std.fmt.bufPrint(&names[i], "o/r{d}", .{i});
+        const path = try std.fmt.bufPrint(&paths[i], "/tmp/w{d}", .{i});
+        try c.add(name, path);
+    }
+    try std.testing.expectError(error.TooManyRepositories, c.add("o/overflow", "/tmp/overflow"));
+    try c.addExclude("o/r0", "*.secret");
+    const bytes = try encode(std.testing.allocator, &c);
+    defer std.testing.allocator.free(bytes);
+    var restored = try decode(std.testing.allocator, bytes);
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("*.secret", restored.find("o/r0").?.exclude_patterns[0]);
 }

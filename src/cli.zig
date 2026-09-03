@@ -9,6 +9,7 @@ const config_mod = @import("integrations/github/config.zig");
 const gh = @import("integrations/github/client.zig");
 const issue_adapter = @import("integrations/github/issue.zig");
 const proposal_apply = @import("proposal/apply.zig");
+const proposal_editor = @import("proposal/editor.zig");
 const generator = @import("proposal/generator.zig");
 const process = @import("platform/process.zig");
 
@@ -70,7 +71,8 @@ fn handleTask(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
     defer s.deinit();
     const action = args[2];
     if (std.mem.eql(u8, action, "ls")) {
-        const text = try renderer.render(a, &s);
+        const filter: ?task_mod.IssueKey = if (args.len == 5 and std.mem.eql(u8, args[3], "--issue")) try parseIssueKey(args[4]) else if (args.len == 3) null else return error.Usage;
+        const text = try renderer.renderFiltered(a, &s, filter);
         defer a.free(text);
         try out.writeAll(text);
         return;
@@ -137,14 +139,18 @@ fn handleTask(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
         return;
     }
     if (std.mem.eql(u8, action, "del")) {
-        if (args.len < 6 or !hasArg(args, "--yes")) return error.ConfirmationRequired;
+        if (args.len < 5) return error.Usage;
         const id = try std.fmt.parseInt(u64, args[3], 10);
+        const count = try s.subtreeCount(id);
+        try out.print("{d}件のTaskに影響します。\n", .{if (hasArg(args, "--subtree")) count else 1});
+        try requireConfirmation(io, out, args, "削除しますか？ [y/N] ");
         if (hasArg(args, "--subtree")) _ = try s.deleteSubtree(id) else if (hasArg(args, "--promote-children")) try s.deletePromote(id) else return error.Usage;
         try store.save(a, io, p.state, &s);
         return;
     }
     if (std.mem.eql(u8, action, "clear")) {
-        if (!hasArg(args, "--yes")) return error.ConfirmationRequired;
+        try out.print("{d}件のTaskを削除します。\n", .{s.tasks.items.len});
+        try requireConfirmation(io, out, args, "全Taskを削除しますか？ [y/N] ");
         _ = s.clearTasks();
         try store.save(a, io, p.state, &s);
         return;
@@ -163,7 +169,16 @@ fn handleRepo(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
         for (c.repositories.items) |r| try out.print("{s}\t{s}\n", .{ r.repository, r.workspace_path });
         return;
     }
-    if (std.mem.eql(u8, action, "add") and args.len == 5) try c.add(args[3], args[4]) else if (std.mem.eql(u8, action, "set-workspace") and args.len == 5) try c.setWorkspace(args[3], args[4]) else if (std.mem.eql(u8, action, "del") and args.len == 5 and std.mem.eql(u8, args[4], "--yes")) try c.delete(args[3]) else if (std.mem.eql(u8, action, "exclude") and args.len >= 5) {
+    if (std.mem.eql(u8, action, "add") and args.len == 5) {
+        try config_mod.validateWorkspace(io, args[4]);
+        try c.add(args[3], args[4]);
+    } else if (std.mem.eql(u8, action, "set-workspace") and args.len == 5) {
+        try config_mod.validateWorkspace(io, args[4]);
+        try c.setWorkspace(args[3], args[4]);
+    } else if (std.mem.eql(u8, action, "del") and args.len >= 4) {
+        try requireConfirmation(io, out, args, "Repository設定を削除しますか？ [y/N] ");
+        try c.delete(args[3]);
+    } else if (std.mem.eql(u8, action, "exclude") and args.len >= 5) {
         const r = c.find(args[4]) orelse return error.RepositoryNotFound;
         if (std.mem.eql(u8, args[3], "ls")) {
             for (r.exclude_patterns) |v| try out.print("{s}\n", .{v});
@@ -202,17 +217,7 @@ fn handleIssue(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     if (std.mem.eql(u8, action, "refresh") and args.len == 4) {
         var parsed = try gh.list(a, io, env, args[3]);
         defer parsed.deinit();
-        for (parsed.value) |remote| {
-            const snap = try issue_adapter.snapshot(a, args[3], remote, std.Io.Clock.real.now(io).toSeconds());
-            var replaced = false;
-            for (s.issues.items, 0..) |existing, i| if (existing.key.eql(snap.key)) {
-                state_mod.freeIssue(a, existing);
-                s.issues.items[i] = snap;
-                replaced = true;
-                break;
-            };
-            if (!replaced) try s.issues.append(a, snap);
-        }
+        try issue_adapter.merge(a, &s, args[3], parsed.value, std.Io.Clock.real.now(io).toSeconds());
         try store.save(a, io, p.state, &s);
         return;
     }
@@ -227,21 +232,36 @@ fn handleProposal(a: std.mem.Allocator, io: std.Io, env: *const std.process.Envi
     defer s.deinit();
     const action = args[2];
     const key = try parseIssueKey(args[3]);
-    if (std.mem.eql(u8, action, "show") or std.mem.eql(u8, action, "edit")) {
+    if (std.mem.eql(u8, action, "show")) {
         const prop = s.findProposal(key) orelse return error.ProposalNotFound;
         try out.print("{s}\n\n", .{prop.summary});
         for (prop.candidates) |c| try out.print("- [{s}] {s}\n", .{ c.candidate_id, c.title });
-        if (std.mem.eql(u8, action, "edit")) try out.writeAll("候補編集APIは利用可能です。現CLIではshow後に再生成または承認してください。\n");
+        return;
+    }
+    if (std.mem.eql(u8, action, "edit")) {
+        const current = s.findProposal(key) orelse return error.ProposalNotFound;
+        var working = try state_mod.cloneProposal(a, current.*);
+        defer state_mod.freeProposal(a, working);
+        var stdin_buffer: [4096]u8 = undefined;
+        var stdin = std.Io.File.stdin().reader(io, &stdin_buffer);
+        const result = try proposal_editor.run(a, &working, &stdin.interface, out);
+        if (result == .aborted) {
+            try out.writeAll("変更を破棄しました。\n");
+            return;
+        }
+        try s.putProposal(working);
+        try store.save(a, io, p.state, &s);
+        try out.writeAll("Proposalを保存しました。\n");
         return;
     }
     if (std.mem.eql(u8, action, "discard")) {
-        if (!hasArg(args, "--yes")) return error.ConfirmationRequired;
+        try requireConfirmation(io, out, args, "Proposalを破棄しますか？ [y/N] ");
         if (!s.removeProposal(key)) return error.ProposalNotFound;
         try store.save(a, io, p.state, &s);
         return;
     }
     if (std.mem.eql(u8, action, "approve")) {
-        if (!hasArg(args, "--yes")) return error.ConfirmationRequired;
+        try requireConfirmation(io, out, args, "Proposalを承認しますか？ [y/N] ");
         const warnings = try proposal_apply.duplicates(a, &s, key);
         defer a.free(warnings);
         if (warnings.len > 0) try out.print("警告: 同名Taskが{d}件あります。--yesによって承認を継続します。\n", .{warnings.len});
@@ -269,13 +289,38 @@ fn doctor(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map,
     const p = try appPaths(a, env, io);
     defer paths_mod.deinit(a, p);
     try out.print("state: {s}\nconfig: {s}\n", .{ p.state, p.config });
-    for ([_][]const u8{ "gh", "fx" }) |exe| {
-        const r = process.run(a, io, .{ .argv = &.{ exe, "--version" }, .env_map = env }) catch {
-            try out.print("{s}: not found\n", .{exe});
+    const gh_version = process.run(a, io, .{ .argv = &.{ "gh", "--version" }, .env_map = env }) catch null;
+    if (gh_version) |r| {
+        defer r.deinit(a);
+        try out.print("gh: {s}\n", .{if (process.successful(r.term)) "available" else "unavailable"});
+    } else try out.writeAll("gh: not found（インストール後に gh auth login）\n");
+    const gh_auth = process.run(a, io, .{ .argv = &.{ "gh", "auth", "status" }, .env_map = env }) catch null;
+    if (gh_auth) |r| {
+        defer r.deinit(a);
+        try out.print("gh authentication: {s}\n", .{if (process.successful(r.term)) "ok" else "required（gh auth login）"});
+    }
+    const fx_version = process.run(a, io, .{ .argv = &.{ "fx", "--version" }, .env_map = env }) catch null;
+    if (fx_version) |r| {
+        defer r.deinit(a);
+        try out.print("fx: {s}\n", .{if (process.successful(r.term)) "available" else "unavailable"});
+    } else try out.writeAll("fx: not found（別途インストール・ログインが必要）\n");
+    const fx_help = process.run(a, io, .{ .argv = &.{ "fx", "ask", "--help" }, .env_map = env }) catch null;
+    if (fx_help) |r| {
+        defer r.deinit(a);
+        const compatible = process.successful(r.term) and std.mem.indexOf(u8, r.stdout, "--json") != null and std.mem.indexOf(u8, r.stdout, "--no-save") != null;
+        try out.print("fx ask capability: {s}\n", .{if (compatible) "ok" else "unsupported"});
+    }
+    var config = config_mod.load(a, io, p.config) catch {
+        try out.writeAll("config: unreadable\n");
+        return;
+    };
+    defer config.deinit();
+    for (config.repositories.items) |repo| {
+        config_mod.validateWorkspace(io, repo.workspace_path) catch {
+            try out.print("workspace {s}: unavailable ({s})\n", .{ repo.repository, repo.workspace_path });
             continue;
         };
-        defer r.deinit(a);
-        try out.print("{s}: {s}\n", .{ exe, if (process.successful(r.term)) "available" else "unavailable" });
+        try out.print("workspace {s}: ok ({s})\n", .{ repo.repository, repo.workspace_path });
     }
 }
 fn parseIssueKey(text: []const u8) !task_mod.IssueKey {
@@ -296,6 +341,15 @@ fn joinArgs(a: std.mem.Allocator, values: []const []const u8) ![]u8 {
 fn hasArg(args: []const []const u8, needle: []const u8) bool {
     for (args) |arg| if (std.mem.eql(u8, arg, needle)) return true;
     return false;
+}
+fn requireConfirmation(io: std.Io, out: *std.Io.Writer, args: []const []const u8, prompt: []const u8) !void {
+    if (hasArg(args, "--yes")) return;
+    try out.writeAll(prompt);
+    try out.flush();
+    var buffer: [64]u8 = undefined;
+    var stdin = std.Io.File.stdin().reader(io, &buffer);
+    const answer = try stdin.interface.takeDelimiter('\n') orelse return error.ConfirmationRequired;
+    if (!confirmed(answer, false)) return error.ConfirmationRequired;
 }
 fn writeErr(io: std.Io, msg: []const u8) void {
     var b: [1024]u8 = undefined;
