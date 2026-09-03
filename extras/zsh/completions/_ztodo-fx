@@ -1,0 +1,7 @@
+#compdef ztodo-fx
+local -a commands
+commands=(help version doctor task repo issue proposal)
+_arguments \
+  '1:command:(${commands})' \
+  '2:action:(ls add edit toggle move reparent link unlink del clear set-workspace exclude refresh show open generate discard approve)' \
+  '*:argument:_files'

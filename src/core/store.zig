@@ -1,0 +1,55 @@
+const std = @import("std");
+const state_mod = @import("state.zig");
+const task_mod = @import("task.zig");
+pub const max_file_size = 16 * 1024 * 1024;
+
+const DiskState = struct { schema_version: u32, next_task_id: u64, tasks: []const task_mod.Task, issues: []const task_mod.IssueSnapshot = &.{}, proposals: []const @import("../proposal/model.zig").Proposal = &.{} };
+
+pub fn encode(a: std.mem.Allocator, state: *const state_mod.StateRoot) ![]u8 {
+    try state.validate();
+    return std.json.Stringify.valueAlloc(a, DiskState{ .schema_version = state.schema_version, .next_task_id = state.next_task_id, .tasks = state.tasks.items, .issues = state.issues.items, .proposals = state.proposals.items }, .{ .whitespace = .indent_2 });
+}
+pub fn decode(a: std.mem.Allocator, bytes: []const u8) !state_mod.StateRoot {
+    if (bytes.len > max_file_size) return error.FileTooLarge;
+    var parsed = std.json.parseFromSlice(DiskState, a, bytes, .{ .ignore_unknown_fields = true }) catch return error.InvalidJson;
+    defer parsed.deinit();
+    var s = state_mod.StateRoot.init(a);
+    errdefer s.deinit();
+    s.schema_version = parsed.value.schema_version;
+    s.next_task_id = parsed.value.next_task_id;
+    for (parsed.value.tasks) |t| try s.tasks.append(a, .{ .id = t.id, .title = try a.dupe(u8, t.title), .status = t.status, .issue_key = try state_mod.dupeOptionalKey(a, t.issue_key), .parent_id = t.parent_id, .position = t.position });
+    // Issue/proposal decoding is intentionally owned below to keep allocations explicit.
+    for (parsed.value.issues) |i| try s.issues.append(a, .{ .key = .{ .repository = try a.dupe(u8, i.key.repository), .issue_number = i.key.issue_number }, .title = try a.dupe(u8, i.title), .body = try a.dupe(u8, i.body), .status = i.status, .last_fetched_at = i.last_fetched_at, .last_error = i.last_error });
+    for (parsed.value.proposals) |p| try s.putProposal(p);
+    try s.validate();
+    return s;
+}
+pub fn load(a: std.mem.Allocator, io: std.Io, path: []const u8) !state_mod.StateRoot {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(max_file_size)) catch |e| return switch (e) {
+        error.FileNotFound => state_mod.StateRoot.init(a),
+        else => error.ReadFailed,
+    };
+    defer a.free(bytes);
+    return decode(a, bytes);
+}
+pub fn save(a: std.mem.Allocator, io: std.Io, path: []const u8, state: *const state_mod.StateRoot) !void {
+    const bytes = try encode(a, state);
+    defer a.free(bytes);
+    var atomic = std.Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true }) catch return error.WriteFailed;
+    defer atomic.deinit(io);
+    std.Io.File.writeStreamingAll(atomic.file, io, bytes) catch return error.WriteFailed;
+    atomic.file.sync(io) catch return error.WriteFailed;
+    atomic.replace(io) catch return error.WriteFailed;
+}
+
+test "Unicode round trip and invalid JSON" {
+    var s = state_mod.StateRoot.init(std.testing.allocator);
+    defer s.deinit();
+    _ = try s.addTask("日本語", null, null);
+    const json = try encode(std.testing.allocator, &s);
+    defer std.testing.allocator.free(json);
+    var restored = try decode(std.testing.allocator, json);
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("日本語", restored.tasks.items[0].title);
+    try std.testing.expectError(error.InvalidJson, decode(std.testing.allocator, "{"));
+}
