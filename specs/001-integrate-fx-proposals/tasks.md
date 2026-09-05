@@ -43,8 +43,8 @@ description: "Implementation tasks for the fx-integrated task management core"
 
 - [X] T006 [P] ztodo-fx専用XDG path、`ZTODO_FX_DATA_FILE`／`ZTODO_FX_CONFIG_FILE` override、既存ztodo path非参照の失敗テストを書く `src/core/paths.zig`
 - [X] T007 ztodo-fx専用path解決と親directory作成を実装してT006を通す `src/core/paths.zig`
-- [ ] T008 [P] shellを介さないargv、cwd、stdin、env override、stdout/stderr上限、deadline、中断を注入可能にするProcessRunnerの失敗テストを書く `src/platform/process.zig`
-- [ ] T009 ProcessRunnerとtyped termination/output resultを実装してT008を通す `src/platform/process.zig`
+- [X] T008 [P] shellを介さないargv、cwd、stdin、env override、stdout/stderr上限、deadline、中断を注入可能にするProcessRunnerの失敗テストを書く `src/platform/process.zig`
+- [X] T009 ProcessRunnerとtyped termination/output resultを実装してT008を通す `src/platform/process.zig`
 - [X] T010 [P] IssueKey、IssueSnapshot、Task、status enum、Unicode title検証の単体テストを書く `src/core/task.zig`
 - [X] T011 IssueKey、IssueSnapshot、Taskと検証helperを実装してT010を通す `src/core/task.zig`
 - [ ] T012 [P] StateRootのID一意性、parent存在、cycle、Issue整合、連続position、Proposal一意性のdecode検証テストを書く `src/core/state.zig`

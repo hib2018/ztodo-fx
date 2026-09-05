@@ -58,3 +58,21 @@ pub fn successful(term: std.process.Child.Term) bool {
 test "empty argv fails" {
     try std.testing.expectError(error.InvalidRequest, run(std.testing.allocator, std.testing.io, .{ .argv = &.{} }));
 }
+test "runner passes stdin cwd env and typed output" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("RUNNER_TEST", "ok");
+    const result = try run(std.testing.allocator, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", "printf '%s:' \"$RUNNER_TEST\"; pwd; cat" }, .cwd = "/tmp", .stdin = "payload", .env_map = &env });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(successful(result.term));
+    try std.testing.expect(std.mem.startsWith(u8, result.stdout, "ok:"));
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "/tmp") != null);
+    try std.testing.expect(std.mem.endsWith(u8, result.stdout, "payload"));
+}
+test "runner classifies output limit timeout and signal" {
+    try std.testing.expectError(error.OutputTooLarge, run(std.testing.allocator, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", "printf 12345" }, .output_limit = 4 }));
+    try std.testing.expectError(error.Timeout, run(std.testing.allocator, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" }, .stdin = "x", .timeout = .{ .duration = .{ .raw = std.Io.Duration.fromNanoseconds(1), .clock = .awake } } }));
+    const signaled = try run(std.testing.allocator, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", "kill -TERM $$" } });
+    defer signaled.deinit(std.testing.allocator);
+    try std.testing.expect(!successful(signaled.term));
+}
