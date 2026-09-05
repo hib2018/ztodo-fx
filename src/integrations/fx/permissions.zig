@@ -32,7 +32,7 @@ fn scan(value: std.json.Value, workspace: []const u8) !void {
     }
 }
 pub fn preflight(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, workspace: []const u8) !void {
-    const result = try process.run(a, io, .{ .argv = &.{ "fx", "permissions", "--json" }, .env_map = env });
+    const result = try process.run(a, io, .{ .argv = &.{ env.get("ZTODO_FX_FX_BIN") orelse "fx", "permissions", "--json" }, .env_map = env });
     defer result.deinit(a);
     if (!process.successful(result.term)) return error.PermissionCheckFailed;
     try validateJson(a, result.stdout, workspace);

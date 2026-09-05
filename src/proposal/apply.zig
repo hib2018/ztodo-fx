@@ -54,3 +54,16 @@ test "duplicate warnings are scoped to the same issue" {
     try std.testing.expectEqual(@as(usize, 1), warnings.len);
     try std.testing.expectEqual(@as(u64, 1), warnings[0].existing_task_id);
 }
+test "approval appends tasks in dependency order with monotonic ids" {
+    var s = state_mod.StateRoot.init(std.testing.allocator);
+    defer s.deinit();
+    try s.issues.append(std.testing.allocator, .{ .key = .{ .repository = try std.testing.allocator.dupe(u8, "a/b"), .issue_number = 1 }, .title = try std.testing.allocator.dupe(u8, "i"), .body = try std.testing.allocator.dupe(u8, "") });
+    _ = try s.addTask("existing", .{ .repository = "a/b", .issue_number = 1 }, null);
+    const p = @import("model.zig").Proposal{ .issue_key = .{ .repository = "a/b", .issue_number = 1 }, .issue_title = "i", .summary = "s", .candidates = &.{ .{ .candidate_id = "child", .title = "child", .parent_candidate_id = "root", .position = 0 }, .{ .candidate_id = "root", .title = "root", .position = 0 } }, .generation = .{ .generated_at = 1, .fx_version = "1", .attempt_count = 1 }, .updated_at = 1 };
+    try s.putProposal(p);
+    try std.testing.expectEqual(@as(usize, 2), try apply(&s, p.issue_key));
+    try std.testing.expectEqual(@as(u64, 2), s.tasks.items[1].id);
+    try std.testing.expectEqual(@as(u64, 3), s.tasks.items[2].id);
+    try std.testing.expectEqual(@as(?u64, 2), s.tasks.items[2].parent_id);
+    try s.validate();
+}

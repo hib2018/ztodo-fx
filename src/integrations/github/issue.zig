@@ -53,3 +53,20 @@ test "merge preserves missing issue as deleted" {
     try std.testing.expectEqual(core.IssueStatus.deleted, state.issues.items[0].status);
     try std.testing.expectEqualStrings("old", state.issues.items[0].title);
 }
+test "merge handles open closed duplicate and unavailable transitions" {
+    var state = state_mod.StateRoot.init(std.testing.allocator);
+    defer state.deinit();
+    try merge(std.testing.allocator, &state, "a/b", &.{
+        .{ .number = 1, .title = "open", .body = "one", .state = "OPEN" },
+        .{ .number = 2, .title = "closed", .body = "two", .state = "CLOSED" },
+    }, 10);
+    try std.testing.expectEqual(core.IssueStatus.open, state.issues.items[0].status);
+    try std.testing.expectEqual(core.IssueStatus.closed, state.issues.items[1].status);
+    markRepositoryFailure(&state, "a/b", .network);
+    try std.testing.expectEqual(core.IssueStatus.unavailable, state.issues.items[0].status);
+    try std.testing.expectEqualStrings("open", state.issues.items[0].title);
+    try std.testing.expectError(error.DuplicateIssue, merge(std.testing.allocator, &state, "a/b", &.{
+        .{ .number = 3, .title = "x", .state = "OPEN" },
+        .{ .number = 3, .title = "y", .state = "OPEN" },
+    }, 11));
+}

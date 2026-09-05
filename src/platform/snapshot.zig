@@ -1,6 +1,7 @@
 const std = @import("std");
 var snapshot_counter = std.atomic.Value(u64).init(0);
 pub const standard_excludes = [_][]const u8{ ".git", ".env", ".env.local", ".DS_Store", ".zig-cache", "zig-out", "credentials", "secrets", "id_rsa", "id_ed25519", ".npmrc", ".pypirc", ".aws" };
+pub const max_snapshot_bytes: u64 = 64 * 1024 * 1024;
 pub fn shouldExclude(relative: []const u8, custom: []const []const u8) bool {
     for (standard_excludes) |pattern| if (std.mem.eql(u8, relative, pattern) or std.mem.startsWith(u8, relative, pattern)) return true;
     for (custom) |pattern| if (std.mem.indexOf(u8, relative, pattern) != null) return true;
@@ -49,10 +50,21 @@ pub fn create(a: std.mem.Allocator, io: std.Io, base: []const u8, workspace: []c
     if (!process.successful(copied.term)) return error.SnapshotCopyFailed;
     for (standard_excludes) |name| try removeMatches(a, io, snap.path, name);
     for (custom) |name| try removeMatches(a, io, snap.path, name);
+    try enforceSize(a, io, snap.path);
     const readonly = try process.run(a, io, .{ .argv = &.{ "chmod", "-R", "a-w", snap.path } });
     defer readonly.deinit(a);
     if (!process.successful(readonly.term)) return error.SnapshotReadonlyFailed;
     return snap;
+}
+fn enforceSize(a: std.mem.Allocator, io: std.Io, root: []const u8) !void {
+    const process = @import("process.zig");
+    const result = try process.run(a, io, .{ .argv = &.{ "du", "-sk", root } });
+    defer result.deinit(a);
+    if (!process.successful(result.term)) return error.SnapshotSizeCheckFailed;
+    var tokens = std.mem.tokenizeAny(u8, result.stdout, " \t\r\n");
+    const first = tokens.next() orelse return error.SnapshotSizeCheckFailed;
+    const kib = std.fmt.parseInt(u64, first, 10) catch return error.SnapshotSizeCheckFailed;
+    if (kib * 1024 > max_snapshot_bytes) return error.SnapshotTooLarge;
 }
 fn removeMatches(a: std.mem.Allocator, io: std.Io, root: []const u8, pattern: []const u8) !void {
     if (pattern.len == 0 or std.mem.eql(u8, pattern, ".") or std.mem.eql(u8, pattern, "..") or std.fs.path.isAbsolute(pattern)) return error.UnsafeExcludePattern;
@@ -67,6 +79,9 @@ test "secret and custom paths are excluded" {
 }
 test "cleanup cannot escape owned root" {
     try std.testing.expectError(error.UnsafeCleanupTarget, validateOwnedRoot("/tmp/owned", "/tmp/other"));
+}
+test "snapshot size limit is bounded" {
+    try std.testing.expectEqual(@as(u64, 64 * 1024 * 1024), max_snapshot_bytes);
 }
 test "snapshot directories are unique" {
     var tmp = std.testing.tmpDir(.{});

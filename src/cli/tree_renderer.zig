@@ -41,3 +41,18 @@ test "renderer includes status and id" {
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "[ ] 1: x") != null);
 }
+test "renderer shows Unicode branches issue state and filtering" {
+    var s = state.StateRoot.init(std.testing.allocator);
+    defer s.deinit();
+    try s.issues.append(std.testing.allocator, .{ .key = .{ .repository = try std.testing.allocator.dupe(u8, "a/b"), .issue_number = 1 }, .title = try std.testing.allocator.dupe(u8, "課題"), .body = try std.testing.allocator.dupe(u8, ""), .status = .closed });
+    try s.issues.append(std.testing.allocator, .{ .key = .{ .repository = try std.testing.allocator.dupe(u8, "a/b"), .issue_number = 2 }, .title = try std.testing.allocator.dupe(u8, "除外"), .body = try std.testing.allocator.dupe(u8, "") });
+    const root = try s.addTask("親", .{ .repository = "a/b", .issue_number = 1 }, null);
+    const child = try s.addTask("子", .{ .repository = "a/b", .issue_number = 1 }, root);
+    _ = try s.toggle(child);
+    const text = try renderFiltered(std.testing.allocator, &s, .{ .repository = "a/b", .issue_number = 1 });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "[closed] 課題") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "[x] 2: 子") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "除外") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Unlinked") == null);
+}

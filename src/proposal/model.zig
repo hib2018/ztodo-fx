@@ -77,3 +77,26 @@ test "proposal candidate count duplicate title and missing parent are rejected" 
     missing.candidates = &.{.{ .candidate_id = "a", .title = "x", .parent_candidate_id = "missing", .position = 0 }};
     try std.testing.expectError(error.MissingParent, validate(missing));
 }
+test "proposal rejects duplicate candidate ids and oversized Unicode titles" {
+    const meta = GenerationMetadata{ .generated_at = 1, .fx_version = "1", .attempt_count = 1 };
+    const duplicate = Proposal{ .issue_key = .{ .repository = "a/b", .issue_number = 1 }, .issue_title = "i", .summary = "s", .candidates = &.{ .{ .candidate_id = "a", .title = "one", .position = 0 }, .{ .candidate_id = "a", .title = "two", .position = 1 } }, .generation = meta, .updated_at = 1 };
+    try std.testing.expectError(error.DuplicateCandidateId, validate(duplicate));
+    var bytes: [201]u8 = @splat('x');
+    const long = Proposal{ .issue_key = duplicate.issue_key, .issue_title = "i", .summary = "s", .candidates = &.{.{ .candidate_id = "a", .title = &bytes, .position = 0 }}, .generation = meta, .updated_at = 1 };
+    try std.testing.expectError(error.TitleTooLong, validate(long));
+}
+test "proposal rejects more than twenty candidates and discontinuous positions" {
+    const meta = GenerationMetadata{ .generated_at = 1, .fx_version = "1", .attempt_count = 1 };
+    var candidates: [21]CandidateTask = undefined;
+    var ids: [21][4]u8 = undefined;
+    for (&candidates, 0..) |*candidate, i| {
+        const id = try std.fmt.bufPrint(&ids[i], "c{d}", .{i});
+        candidate.* = .{ .candidate_id = id, .title = id, .position = @intCast(i) };
+    }
+    const too_many = Proposal{ .issue_key = .{ .repository = "a/b", .issue_number = 1 }, .issue_title = "i", .summary = "s", .candidates = &candidates, .generation = meta, .updated_at = 1 };
+    try std.testing.expectError(error.InvalidCandidateCount, validate(too_many));
+
+    var invalid_position = too_many;
+    invalid_position.candidates = &.{.{ .candidate_id = "a", .title = "x", .position = 1 }};
+    try std.testing.expectError(error.InvalidPosition, validate(invalid_position));
+}

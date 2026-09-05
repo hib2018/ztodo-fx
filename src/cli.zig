@@ -215,7 +215,16 @@ fn handleIssue(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
         return gh.open(io, a, env, key.repository, n);
     }
     if (std.mem.eql(u8, action, "refresh") and args.len == 4) {
-        var parsed = try gh.list(a, io, env, args[3]);
+        var parsed = gh.list(a, io, env, args[3]) catch |err| {
+            issue_adapter.markRepositoryFailure(&s, args[3], switch (err) {
+                error.NotFound => .not_found,
+                error.Forbidden => .forbidden,
+                error.Network => .network,
+                else => .unknown,
+            });
+            try store.save(a, io, p.state, &s);
+            return err;
+        };
         defer parsed.deinit();
         try issue_adapter.merge(a, &s, args[3], parsed.value, std.Io.Clock.real.now(io).toSeconds());
         try store.save(a, io, p.state, &s);
@@ -271,6 +280,10 @@ fn handleProposal(a: std.mem.Allocator, io: std.Io, env: *const std.process.Envi
         return;
     }
     if (std.mem.eql(u8, action, "generate")) {
+        if (s.findProposal(key) != null) {
+            try out.writeAll("このIssueには既存Proposalがあります。\n");
+            try requireConfirmation(io, out, args, "モデルを起動して置き換えますか？ [y/N] ");
+        }
         var c = try config_mod.load(a, io, p.config);
         defer c.deinit();
         const repo = c.find(key.repository) orelse return error.RepositoryNotFound;

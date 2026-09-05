@@ -171,3 +171,10 @@ README、`docs/getting-started.md`、command reference、configuration、trouble
 - overrideを一時directoryへ向けたTask追加、親子追加、tree表示、toggle、move、Repository登録、一覧、doctor: PASS
 - 実`gh`／実`fx`は`doctor`による実行ファイル検出のみ実施。外部Issue更新とモデル要求は外部状態・利用量へ関わるため自動smoke testでは未実行
 - Homebrew配下のZig標準ライブラリ読取りが必要なため、sandbox外の許可付きでビルドした
+
+### 2026-09-05 最終検証記録
+
+- `zig fmt --check build.zig src`、`zig build test`、`zig build`: PASS
+- 偽fx/gh、ProcessRunner、Proposal編集・承認、Issue状態遷移、200 Task・10階層、security回帰を含む全suite: PASS
+- overrideを`/private/tmp`へ向け、空表示、親子Task追加、toggle、保存後tree表示、Repository登録、一覧、doctor: PASS
+- 実`gh`は未認証として修復案内を表示し、実`fx`はask capabilityを確認。外部Issue更新・モデル生成は外部状態と利用量を伴うため未実行

@@ -60,3 +60,22 @@ test "schema and size limits reject without adopting data" {
     @memset(huge, ' ');
     try std.testing.expectError(error.FileTooLarge, decode(std.testing.allocator, huge));
 }
+test "failed validation leaves existing atomic file intact" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const base = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(base);
+    const path = try std.fs.path.join(a, &.{ base, "state.json" });
+    defer a.free(path);
+    var good = state_mod.StateRoot.init(a);
+    defer good.deinit();
+    _ = try good.addTask("keep", null, null);
+    try save(a, io, path, &good);
+    good.next_task_id = 1;
+    try std.testing.expectError(error.InvalidNextId, save(a, io, path, &good));
+    var loaded = try load(a, io, path);
+    defer loaded.deinit();
+    try std.testing.expectEqualStrings("keep", loaded.tasks.items[0].title);
+}

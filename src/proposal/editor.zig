@@ -168,3 +168,22 @@ test "editor abort is distinguishable from save" {
     var writer = std.Io.Writer.fixed(&buffer);
     try std.testing.expectEqual(Result.aborted, try run(std.testing.allocator, &p, &reader, &writer));
 }
+test "editor add edit move reparent and delete preserve a valid proposal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var initial = try a.alloc(model.CandidateTask, 1);
+    initial[0] = .{ .candidate_id = try a.dupe(u8, "a"), .title = try a.dupe(u8, "root"), .position = 0 };
+    var p = model.Proposal{ .issue_key = .{ .repository = "a/b", .issue_number = 1 }, .issue_title = "i", .summary = "s", .candidates = initial, .generation = .{ .generated_at = 1, .fx_version = "1", .attempt_count = 1 }, .updated_at = 1 };
+
+    try add(a, &p, "b", "second", null);
+    try add(a, &p, "c", "child", "a");
+    try editTitle(a, &p, "b", "renamed");
+    try move(&p, "b", 0);
+    try reparent(&p, "c", "b");
+    try delete(a, &p, "b");
+
+    try model.validate(p);
+    try std.testing.expectEqual(@as(usize, 2), p.candidates.len);
+    try std.testing.expect(p.candidates[1].parent_candidate_id == null);
+}
