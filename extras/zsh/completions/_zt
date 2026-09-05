@@ -1,4 +1,4 @@
-#compdef ztodo-fx
+#compdef zt
 
 local context state line
 typeset -A opt_args

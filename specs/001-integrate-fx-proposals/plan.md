@@ -117,7 +117,7 @@ docs/
 ├── configuration.md                 # 保存先、override、除外規則、上限
 └── troubleshooting.md               # gh／fx／権限／生成失敗の診断
 
-extras/zsh/completions/_ztodo-fx
+extras/zsh/completions/_zt
 ```
 
 **Structure Decision**: 既存ztodoの`core`、`proposal`、`integrations`、`platform`、薄い

@@ -25,11 +25,11 @@ description: "Implementation tasks for the fx-integrated task management core"
 
 **Purpose**: Zig 0.16の単一プロジェクトと、既存ztodoに準じたモジュール境界を初期化する。
 
-- [X] T001 Zig 0.16.0、`ztodo-fx` executable、library module、run/test stepsを定義する `build.zig` と `build.zig.zon`
+- [X] T001 Zig 0.16.0、`zt` executable、library module、run/test stepsを定義する `build.zig` と `build.zig.zon`
 - [X] T002 `main`を薄いentry point、`root`を公開module/test集約として初期化する `src/main.zig` と `src/root.zig`
 - [X] T003 [P] CLI command union、exit code定数、未実装commandのparse骨格を作る `src/cli.zig`
 - [X] T004 [P] core、proposal、GitHub、fx、platformのmodule directoryと空のmodule fileを計画構造どおり作る `src/core/`、`src/proposal/`、`src/integrations/github/`、`src/integrations/fx/`、`src/platform/`
-- [X] T005 [P] CLI全command groupの補完骨格を作る `extras/zsh/completions/_ztodo-fx`
+- [X] T005 [P] CLI全command groupの補完骨格を作る `extras/zsh/completions/_zt`
 
 **Checkpoint**: `zig build test`と`zig build`が空のmodule構造で成功する。
 
@@ -170,7 +170,7 @@ Stateを表示し、所属、階層、兄弟順、完了状態を2秒以内に�
 - [X] T066 [P] XDG保存先、override、schema、上限、標準/custom除外、旧ztodo非移行を記載する `docs/configuration.md`
 - [X] T067 [P] gh/fx/unsafe permission/timeout/invalid output/破損Stateの復旧手順を書く `docs/troubleshooting.md`
 - [X] T068 [P] プロジェクト概要、必要環境、quick start、詳細docs linkを更新する `README.md`
-- [X] T069 CLI契約の全command、option、Task ID候補をZsh補完へ反映する `extras/zsh/completions/_ztodo-fx`
+- [X] T069 CLI契約の全command、option、Task ID候補をZsh補完へ反映する `extras/zsh/completions/_zt`
 - [X] T070 [P] prompt、response、credential、Issue bodyを通常log/errorへ出さないこととsnapshot escapeを検証するsecurity回帰テストを追加する `src/root.zig`
 - [X] T071 `src/root.zig`へ全module test importを集約し、未登録moduleがないことを確認する `src/root.zig`
 - [X] T072 `zig fmt --check build.zig src`、`zig build test`、`zig build`を実行し結果を記録する `specs/001-integrate-fx-proposals/quickstart.md`

@@ -5,6 +5,7 @@ pub const store = @import("core/store.zig");
 pub const paths = @import("core/paths.zig");
 pub const tree = @import("core/tree.zig");
 pub const proposal = @import("proposal/model.zig");
+pub const tui = @import("tui/app.zig");
 
 test {
     _ = cli;
@@ -14,6 +15,8 @@ test {
     _ = paths;
     _ = tree;
     _ = proposal;
+    _ = tui;
+    _ = @import("tui/model.zig");
     _ = @import("proposal/editor.zig");
     _ = @import("proposal/apply.zig");
     _ = @import("proposal/generator.zig");
@@ -100,8 +103,8 @@ test "fake gh repository registration and refresh persist snapshots" {
     try env.put("ZTODO_FX_DATA_FILE", state_path);
     try env.put("ZTODO_FX_CONFIG_FILE", config_path);
     try env.put("ZTODO_FX_GH_BIN", script);
-    try std.testing.expectEqual(@as(u8, 0), cli.run(a, io, &env, &.{ "ztodo-fx", "repo", "add", "a/b", base }));
-    try std.testing.expectEqual(@as(u8, 0), cli.run(a, io, &env, &.{ "ztodo-fx", "issue", "refresh", "a/b" }));
+    try std.testing.expectEqual(@as(u8, 0), cli.run(a, io, &env, &.{ "zt", "repo", "add", "a/b", base }));
+    try std.testing.expectEqual(@as(u8, 0), cli.run(a, io, &env, &.{ "zt", "issue", "refresh", "a/b" }));
     var loaded = try store.load(a, io, state_path);
     defer loaded.deinit();
     try std.testing.expectEqual(@as(usize, 1), loaded.issues.items.len);

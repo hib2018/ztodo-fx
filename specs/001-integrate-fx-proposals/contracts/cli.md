@@ -1,6 +1,6 @@
 # CLI Contract
 
-Executable name: `ztodo-fx`
+Executable name: `zt`. Running it without arguments starts the TUI; subcommands retain the non-interactive CLI.
 
 ## General rules
 
@@ -14,9 +14,9 @@ Executable name: `ztodo-fx`
 ## Diagnostics and setup
 
 ```text
-ztodo-fx doctor
-ztodo-fx help [command]
-ztodo-fx version
+zt doctor
+zt help [command]
+zt version
 ```
 
 `doctor` reports `gh` presence/authentication, `fx` presence/authentication, required fx capabilities, effective
@@ -25,13 +25,13 @@ permission safety, data/config paths, and registered Workspace accessibility wit
 ## Repository and Workspace management
 
 ```text
-ztodo-fx repo add <owner/name> <absolute-workspace-path>
-ztodo-fx repo ls
-ztodo-fx repo set-workspace <owner/name> <absolute-workspace-path>
-ztodo-fx repo del <owner/name> [--yes]
-ztodo-fx repo exclude add <owner/name> <pattern>
-ztodo-fx repo exclude ls <owner/name>
-ztodo-fx repo exclude del <owner/name> <pattern>
+zt repo add <owner/name> <absolute-workspace-path>
+zt repo ls
+zt repo set-workspace <owner/name> <absolute-workspace-path>
+zt repo del <owner/name> [--yes]
+zt repo exclude add <owner/name> <pattern>
+zt repo exclude ls <owner/name>
+zt repo exclude del <owner/name> <pattern>
 ```
 
 - `repo add` validates both values before saving and rejects duplicate Repository or Workspace mappings.
@@ -42,10 +42,10 @@ ztodo-fx repo exclude del <owner/name> <pattern>
 ## Issue operations
 
 ```text
-ztodo-fx issue ls [owner/name]
-ztodo-fx issue refresh [owner/name]
-ztodo-fx issue show <owner/name#number>
-ztodo-fx issue open <owner/name#number>
+zt issue ls [owner/name]
+zt issue refresh [owner/name]
+zt issue show <owner/name#number>
+zt issue open <owner/name#number>
 ```
 
 - `ls` uses the latest successful snapshot and marks closed/deleted/unavailable nodes.
@@ -55,16 +55,16 @@ ztodo-fx issue open <owner/name#number>
 ## Task operations
 
 ```text
-ztodo-fx task ls [--issue <owner/name#number>]
-ztodo-fx task add <title...> [--issue <owner/name#number>] [--parent <task-id>]
-ztodo-fx task edit <task-id> <title...>
-ztodo-fx task toggle <task-id>
-ztodo-fx task move <task-id> <one-based-position>
-ztodo-fx task reparent <task-id> (--parent <task-id> | --root) [--issue <owner/name#number>]
-ztodo-fx task link <task-id> <owner/name#number>
-ztodo-fx task unlink <task-id>
-ztodo-fx task del <task-id> (--promote-children | --subtree) [--yes]
-ztodo-fx task clear [--yes]
+zt task ls [--issue <owner/name#number>]
+zt task add <title...> [--issue <owner/name#number>] [--parent <task-id>]
+zt task edit <task-id> <title...>
+zt task toggle <task-id>
+zt task move <task-id> <one-based-position>
+zt task reparent <task-id> (--parent <task-id> | --root) [--issue <owner/name#number>]
+zt task link <task-id> <owner/name#number>
+zt task unlink <task-id>
+zt task del <task-id> (--promote-children | --subtree) [--yes]
+zt task clear [--yes]
 ```
 
 - `task ls` always emits a tree. Issue nodes are roots; unlinked Tasks appear below an `Unlinked` root.
@@ -77,11 +77,11 @@ ztodo-fx task clear [--yes]
 ## Proposal workflow
 
 ```text
-ztodo-fx proposal generate <owner/name#number>
-ztodo-fx proposal show <owner/name#number>
-ztodo-fx proposal edit <owner/name#number>
-ztodo-fx proposal discard <owner/name#number> [--yes]
-ztodo-fx proposal approve <owner/name#number> [--yes]
+zt proposal generate <owner/name#number>
+zt proposal show <owner/name#number>
+zt proposal edit <owner/name#number>
+zt proposal discard <owner/name#number> [--yes]
+zt proposal approve <owner/name#number> [--yes]
 ```
 
 - `generate` requires a registered Workspace, successful `doctor` checks, and explicit invocation. It does not start
@@ -108,4 +108,3 @@ ztodo-fx proposal approve <owner/name#number> [--yes]
 | `ProposalGenerationFailed` | Categorize timeout, provider, permission, invalid envelope, invalid Proposal |
 | `InvalidState` | Do not overwrite; show state path and backup/recovery guidance |
 | `WriteFailed` | Confirm original data was retained and show destination path |
-

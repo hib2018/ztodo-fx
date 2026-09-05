@@ -22,7 +22,7 @@ fx status
 
 ## 2. Isolated data paths
 
-通常の利用者データを避けるため、検証専用directoryを作り、ztodo-fx用overrideを設定する。
+通常の利用者データを避けるため、検証専用directoryを作り、zt用overrideを設定する。
 
 ```sh
 export ZTODO_FX_DATA_FILE="/absolute/test-area/state.json"
@@ -49,8 +49,8 @@ zig build
 ## 4. Empty-start and diagnostics
 
 ```sh
-./zig-out/bin/ztodo-fx doctor
-./zig-out/bin/ztodo-fx task ls
+./zig-out/bin/zt doctor
+./zig-out/bin/zt task ls
 ```
 
 期待結果:
@@ -61,10 +61,10 @@ zig build
 ## 5. Register Repository and Workspace
 
 ```sh
-./zig-out/bin/ztodo-fx repo add owner/repository /absolute/path/to/workspace
-./zig-out/bin/ztodo-fx repo ls
-./zig-out/bin/ztodo-fx issue refresh owner/repository
-./zig-out/bin/ztodo-fx issue ls owner/repository
+./zig-out/bin/zt repo add owner/repository /absolute/path/to/workspace
+./zig-out/bin/zt repo ls
+./zig-out/bin/zt issue refresh owner/repository
+./zig-out/bin/zt issue ls owner/repository
 ```
 
 期待結果:
@@ -76,12 +76,12 @@ zig build
 ## 6. Manual Task tree
 
 ```sh
-./zig-out/bin/ztodo-fx task add "root work" --issue owner/repository#123
-./zig-out/bin/ztodo-fx task add "child one" --parent 1
-./zig-out/bin/ztodo-fx task add "child two" --parent 1
-./zig-out/bin/ztodo-fx task ls --issue owner/repository#123
-./zig-out/bin/ztodo-fx task move 3 1
-./zig-out/bin/ztodo-fx task toggle 1
+./zig-out/bin/zt task add "root work" --issue owner/repository#123
+./zig-out/bin/zt task add "child one" --parent 1
+./zig-out/bin/zt task add "child two" --parent 1
+./zig-out/bin/zt task ls --issue owner/repository#123
+./zig-out/bin/zt task move 3 1
+./zig-out/bin/zt task toggle 1
 ```
 
 期待結果:
@@ -93,8 +93,8 @@ zig build
 親削除の両方針を別々の検証データで確認する。
 
 ```sh
-./zig-out/bin/ztodo-fx task del 1 --promote-children
-./zig-out/bin/ztodo-fx task del 10 --subtree
+./zig-out/bin/zt task del 1 --promote-children
+./zig-out/bin/zt task del 10 --subtree
 ```
 
 確認で`y`以外を入力した場合は変更なし。確定時、昇格は相対順序を保ち、subtree削除は全子孫を
@@ -103,9 +103,9 @@ zig build
 ## 7. Generate and review Proposal
 
 ```sh
-./zig-out/bin/ztodo-fx proposal generate owner/repository#123
-./zig-out/bin/ztodo-fx proposal show owner/repository#123
-./zig-out/bin/ztodo-fx proposal edit owner/repository#123
+./zig-out/bin/zt proposal generate owner/repository#123
+./zig-out/bin/zt proposal show owner/repository#123
+./zig-out/bin/zt proposal edit owner/repository#123
 ```
 
 期待結果:
@@ -121,7 +121,7 @@ zig build
 既存Taskと完全一致する候補タイトルをProposalへ作り、承認する。
 
 ```sh
-./zig-out/bin/ztodo-fx proposal approve owner/repository#123
+./zig-out/bin/zt proposal approve owner/repository#123
 ```
 
 期待結果:
@@ -157,8 +157,8 @@ zig build
 zig fmt --check build.zig src
 zig build test
 zig build
-./zig-out/bin/ztodo-fx help
-./zig-out/bin/ztodo-fx doctor
+./zig-out/bin/zt help
+./zig-out/bin/zt doctor
 ```
 
 README、`docs/getting-started.md`、command reference、configuration、troubleshooting、help text、Zsh補完が

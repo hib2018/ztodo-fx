@@ -37,12 +37,12 @@ pub fn run(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map
     var out_file = std.Io.File.stdout().writer(io, &buffer);
     const out = &out_file.interface;
     const command = parse(args) catch {
-        writeErr(io, "不明なコマンドです。`ztodo-fx help`を実行してください");
+        writeErr(io, "不明なコマンドです。`zt help`を実行してください");
         return exit_usage;
     };
     const result: anyerror!void = switch (command) {
         .help => out.writeAll(usage),
-        .version => out.print("ztodo-fx {s}\n", .{version}),
+        .version => out.print("zt {s}\n", .{version}),
         .doctor => doctor(a, io, env, out),
         .task => handleTask(a, io, env, args, out),
         .repo => handleRepo(a, io, env, args, out),
@@ -384,12 +384,12 @@ fn writeError(io: std.Io, e: anyerror) void {
     w.interface.print("Error ({t}): {s}\n", .{ e, guidance }) catch {};
     w.interface.flush() catch {};
 }
-const usage = "Usage: ztodo-fx <doctor|task|repo|issue|proposal|help|version>\nRun `ztodo-fx help <command>` or see docs/command-reference.md.\n";
+const usage = "Usage: zt [doctor|task|repo|issue|proposal|help|version]\nRun `zt` without arguments to start the TUI, or `zt help` for CLI commands.\n";
 test "only lowercase y or flag confirms" {
     try std.testing.expect(confirmed("y\n", false));
     try std.testing.expect(!confirmed("Y\n", false));
     try std.testing.expect(confirmed("", true));
 }
 test "all command groups parse" {
-    for ([_][]const u8{ "doctor", "task", "repo", "issue", "proposal" }) |name| _ = try parse(&.{ "ztodo-fx", name });
+    for ([_][]const u8{ "doctor", "task", "repo", "issue", "proposal" }) |name| _ = try parse(&.{ "zt", name });
 }
