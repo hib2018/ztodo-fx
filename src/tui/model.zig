@@ -8,6 +8,7 @@ pub const Model = struct {
         edit,
         task_reparent,
         search,
+        menu,
         repositories,
         repository_add,
         repository_workspace,
@@ -25,11 +26,15 @@ pub const Model = struct {
         confirm_proposal_duplicates,
         confirm_proposal_discard,
     };
+    pub const MenuTab = enum { proposal, repositories, issues };
 
     selected: usize = 0,
     selected_issue: usize = 0,
     selected_candidate: usize = 0,
     selected_repository: usize = 0,
+    menu_tab: MenuTab = .proposal,
+    menu_selected: usize = 0,
+    show_closed: bool = false,
     focus: Focus = .tree,
     mode: Mode = .normal,
     input: [800]u8 = undefined,
@@ -38,7 +43,7 @@ pub const Model = struct {
     filter_len: usize = 0,
     message: [256]u8 = undefined,
     message_len: usize = 0,
-    expanded_issues: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    expanded_issues: std.AutoHashMapUnmanaged(u64, void) = .empty,
     expanded_unlinked: bool = false,
     expanded_tasks: std.AutoHashMapUnmanaged(u64, void) = .empty,
     detail_scroll: usize = 0,
@@ -70,12 +75,30 @@ pub const Model = struct {
         };
     }
 
-    pub fn issueExpanded(self: *const Model, index: usize) bool {
-        return self.expanded_issues.contains(index);
+    pub fn issueExpanded(self: *const Model, token: u64) bool {
+        return self.expanded_issues.contains(token);
     }
 
-    pub fn toggleIssue(self: *Model, allocator: std.mem.Allocator, index: usize) !void {
-        if (!self.expanded_issues.remove(index)) try self.expanded_issues.put(allocator, index, {});
+    pub fn toggleIssue(self: *Model, allocator: std.mem.Allocator, token: u64) !void {
+        if (!self.expanded_issues.remove(token)) try self.expanded_issues.put(allocator, token, {});
+    }
+
+    pub fn nextMenuTab(self: *Model) void {
+        self.menu_tab = switch (self.menu_tab) {
+            .proposal => .repositories,
+            .repositories => .issues,
+            .issues => .proposal,
+        };
+        self.menu_selected = 0;
+    }
+
+    pub fn previousMenuTab(self: *Model) void {
+        self.menu_tab = switch (self.menu_tab) {
+            .proposal => .issues,
+            .repositories => .proposal,
+            .issues => .repositories,
+        };
+        self.menu_selected = 0;
     }
 
     pub fn taskExpanded(self: *const Model, id: u64) bool {
@@ -148,4 +171,14 @@ test "expanded nodes have no fixed item limit" {
     }
     try std.testing.expect(model.issueExpanded(1499));
     try std.testing.expect(model.taskExpanded(1500));
+}
+
+test "menu tabs cycle and reset their selection" {
+    var model: Model = .{};
+    model.menu_selected = 3;
+    model.nextMenuTab();
+    try std.testing.expectEqual(Model.MenuTab.repositories, model.menu_tab);
+    try std.testing.expectEqual(@as(usize, 0), model.menu_selected);
+    model.previousMenuTab();
+    try std.testing.expectEqual(Model.MenuTab.proposal, model.menu_tab);
 }
