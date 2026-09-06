@@ -11,7 +11,7 @@ zig build
 ./zig-out/bin/zt
 ```
 
-TUIでは`j`/`k`または矢印キーでTaskを選択し、`Space`で完了状態を切り替え、`q`で終了します。初期版はIssue・Task・詳細の3ペイン表示です。
+TUIはIssueを親とするTaskツリーと詳細の2ペイン表示です。`j`/`k`または矢印キーで項目を選択し、`Enter`で展開・折り畳み、`Space`でTaskの完了状態を切り替え、`q`で終了します。
 
 - [導入と初期設定](docs/getting-started.md)
 - [コマンド一覧](docs/command-reference.md)

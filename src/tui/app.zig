@@ -36,6 +36,11 @@ const OperationBox = struct {
     result: ?(anyerror!Proposal) = null,
 };
 const Operation = struct { box: *OperationBox, future: std.Io.Future(void), cancel_requested: bool = false };
+const TreeRow = union(enum) {
+    issue: usize,
+    unlinked,
+    task: struct { id: u64, depth: usize },
+};
 
 pub fn run(init: std.process.Init) u8 {
     runFallible(init) catch |err| {
@@ -60,6 +65,7 @@ fn runFallible(init: std.process.Init) !void {
     defer config.deinit();
     const config_service = ConfigService{ .allocator = allocator, .io = init.io, .config_path = paths.config };
     var model: Model = .{};
+    defer model.deinit(allocator);
 
     var tty_buffer: [4096]u8 = undefined;
     var tty = try vaxis.Tty.init(init.io, &tty_buffer);
@@ -85,15 +91,17 @@ fn runFallible(init: std.process.Init) !void {
         var frame_arena = std.heap.ArenaAllocator.init(allocator);
         defer frame_arena.deinit();
         const frame_allocator = frame_arena.allocator();
-        const issue_filter = selectedIssue(&state, model.selected_issue);
-        const ordered_ids = try taskOrder(frame_allocator, &state, issue_filter, model.filterSlice());
-        draw(frame_allocator, &vx, &state, &config, model, ordered_ids);
+        const rows = try visibleTreeRows(frame_allocator, &state, &model, model.filterSlice());
+        if (model.selected >= rows.len and rows.len != 0) model.selected = rows.len - 1;
+        syncSelection(&model, &state, rows);
+        const selected_task = selectedTreeTask(rows, model.selected);
+        draw(frame_allocator, &vx, &state, &config, model, rows);
         try vx.render(tty.writer());
         const event = try loop.nextEvent();
         switch (event) {
             .operation_complete => finishProposalOperation(allocator, init.io, service, &model, &state, &operation),
             .winsize => |size| try vx.resize(allocator, tty.writer(), size),
-            .mouse => |mouse| handleMouse(&model, mouse, vx.window().width, vx.window().height, state.issues.items.len, ordered_ids.len),
+            .mouse => |mouse| handleMouse(&model, mouse, vx.window().width, vx.window().height, rows.len),
             .key_press => |key| {
                 if (key.matches('c', .{ .ctrl = true })) break;
                 model.message_len = 0;
@@ -109,12 +117,12 @@ fn runFallible(init: std.process.Init) !void {
                     handleRepositoryInput(&model, key, &config, config_service) catch |err| setError(&model, err);
                     continue;
                 }
-                if (model.mode == .add or model.mode == .edit or model.mode == .search or model.mode == .proposal_add or model.mode == .proposal_edit or model.mode == .proposal_reparent) {
-                    handleInput(&model, key, &state, ordered_ids, service) catch |err| setError(&model, err);
+                if (model.mode == .add or model.mode == .edit or model.mode == .task_reparent or model.mode == .search or model.mode == .proposal_add or model.mode == .proposal_edit or model.mode == .proposal_reparent) {
+                    handleInput(&model, key, &state, selected_task, service) catch |err| setError(&model, err);
                     continue;
                 }
                 if (model.mode == .confirm_delete) {
-                    if (key.matches(vaxis.Key.escape, .{})) model.mode = .normal else if (model.selectedTaskId(ordered_ids)) |id| {
+                    if (key.matches(vaxis.Key.escape, .{})) model.mode = .normal else if (selected_task) |id| {
                         if (key.matches('s', .{})) {
                             service.deleteTask(&state, id, true) catch |err| {
                                 setError(&model, err);
@@ -130,6 +138,19 @@ fn runFallible(init: std.process.Init) !void {
                             model.mode = .normal;
                             model.selected -|= 1;
                         }
+                    }
+                    continue;
+                }
+                if (model.mode == .confirm_clear) {
+                    if (key.matches(vaxis.Key.escape, .{})) model.mode = .normal else if (key.matches('y', .{})) {
+                        const count = service.clearTasks(&state) catch |err| {
+                            setError(&model, err);
+                            continue;
+                        };
+                        var message: [128]u8 = undefined;
+                        model.setMessage(std.fmt.bufPrint(&message, "{d}件のTaskを削除しました", .{count}) catch "Taskを削除しました");
+                        model.mode = .normal;
+                        model.selected = 0;
                     }
                     continue;
                 }
@@ -154,21 +175,17 @@ fn runFallible(init: std.process.Init) !void {
                     continue;
                 }
                 if (key.matches('q', .{})) break;
-                if (model.focus == .issues and key.matches('r', .{})) {
+                if (model.focus == .tree and key.matches('r', .{})) {
                     refreshSelectedIssue(allocator, init.io, init.environ_map, service, &model, &state) catch |err| setError(&model, err);
                     continue;
                 }
-                if (key.matches(vaxis.Key.tab, .{ .shift = true })) model.previousFocus() else if (key.matches(vaxis.Key.tab, .{})) model.nextFocus() else if (key.matches('/', .{})) model.beginInput(.search, model.filterSlice()) else if (key.matches('c', .{})) model.mode = .repositories else if (key.matches('?', .{})) model.mode = .help else if (key.matches('p', .{})) model.mode = .proposal else switch (model.focus) {
-                    .issues => handleIssueNavigation(&model, key, state.issues.items.len),
-                    .tasks => handleTaskKey(&model, key, &state, ordered_ids, issue_filter, service) catch |err| setError(&model, err),
-                    .details => {},
-                }
+                if (key.matches(vaxis.Key.tab, .{ .shift = true })) model.previousFocus() else if (key.matches(vaxis.Key.tab, .{})) model.nextFocus() else if (key.matches('/', .{})) model.beginInput(.search, model.filterSlice()) else if (key.matches('c', .{})) model.mode = .repositories else if (key.matches('?', .{})) model.mode = .help else if (key.matches('p', .{})) model.mode = .proposal else if (model.focus == .tree) handleTreeKey(&model, key, &state, rows, service) catch |err| setError(&model, err) else handleDetailKey(&model, key);
             },
         }
     }
 }
 
-fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import("../core/state.zig").StateRoot, config: *const config_mod.Config, model: Model, ordered_ids: []const u64) void {
+fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import("../core/state.zig").StateRoot, config: *const config_mod.Config, model: Model, rows: []const TreeRow) void {
     const screen = vx.window();
     screen.clear();
     screen.hideCursor();
@@ -177,68 +194,38 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
         return;
     }
     const body_height = screen.height -| 2;
-    const compact = screen.width < 90;
-    const left_width: u16 = if (compact) (if (model.focus == .issues) screen.width else 0) else @max(@as(u16, 20), screen.width / 4);
-    const detail_width: u16 = if (compact) (if (model.focus == .details) screen.width else 0) else @max(@as(u16, 24), screen.width / 4);
-    const center_width: u16 = if (compact) (if (model.focus == .tasks) screen.width else 0) else screen.width -| left_width -| detail_width;
+    const left_width: u16 = screen.width / 2;
+    const detail_width: u16 = screen.width - left_width;
     const left = screen.child(.{ .width = left_width, .height = body_height, .border = .{ .where = .all } });
-    const center = screen.child(.{ .x_off = @intCast(left_width), .width = center_width, .height = body_height, .border = .{ .where = .all } });
-    const detail = screen.child(.{ .x_off = @intCast(left_width + center_width), .width = detail_width, .height = body_height, .border = .{ .where = .all } });
+    const detail = screen.child(.{ .x_off = @intCast(left_width), .width = detail_width, .height = body_height, .border = .{ .where = .all } });
     const footer = screen.child(.{ .y_off = @intCast(body_height), .height = 2 });
 
-    _ = left.printSegment(.{ .text = "Repositories / Issues" }, .{ .wrap = .none });
+    _ = left.printSegment(.{ .text = "Issues / Tasks" }, .{ .wrap = .none });
     var row: u16 = 2;
-    const issue_visible: usize = @max(@as(usize, 1), left.height -| 3);
-    const issue_offset = if (model.selected_issue >= issue_visible) model.selected_issue - issue_visible + 1 else 0;
-    for (state.issues.items[issue_offset..], issue_offset..) |issue, index| {
+    const visible: usize = @max(@as(usize, 1), left.height -| 3);
+    const offset = if (model.selected >= visible) model.selected - visible + 1 else 0;
+    for (rows[offset..], offset..) |tree_row, index| {
         if (row >= left.height) break;
-        const line = std.fmt.allocPrint(allocator, "{s}#{d} [{s}] {s}", .{ issue.key.repository, issue.key.issue_number, @tagName(issue.status), issue.title }) catch continue;
-        const issue_style = vaxis.Style{ .fg = .{ .index = switch (issue.status) {
-            .open => 2,
-            .closed => 8,
-            .deleted => 1,
-            .unavailable => 3,
-        } }, .reverse = model.focus == .issues and index == model.selected_issue };
-        _ = left.printSegment(.{ .text = line, .style = issue_style }, .{ .row_offset = row, .wrap = .none });
+        const line = treeRowText(allocator, state, &model, tree_row) catch continue;
+        const style = treeRowStyle(state, tree_row, model.focus == .tree and index == model.selected);
+        _ = left.printSegment(.{ .text = line, .style = style }, .{ .row_offset = row, .wrap = .none });
         row += 1;
     }
-    if (row < left.height) _ = left.printSegment(.{ .text = "Unlinked", .style = if (model.focus == .issues and model.selected_issue == state.issues.items.len) .{ .reverse = true } else .{} }, .{ .row_offset = row, .wrap = .none });
-
-    _ = center.printSegment(.{ .text = "Tasks" }, .{ .wrap = .none });
-    row = 2;
-    const task_visible: usize = @max(@as(usize, 1), center.height -| 3);
-    const task_offset = if (model.selected >= task_visible) model.selected - task_visible + 1 else 0;
-    for (ordered_ids[task_offset..], task_offset..) |id, index| {
-        if (row >= center.height) break;
-        const item = findTask(state, id) orelse continue;
-        const depth = tree.depth(state, item.id) catch 0;
-        const indent = allocator.alloc(u8, depth * 2) catch continue;
-        @memset(indent, ' ');
-        const line = std.fmt.allocPrint(allocator, "{s}{s} {d}: {s}", .{ indent, if (item.status == .done) "[x]" else "[ ]", item.id, item.title }) catch continue;
-        _ = center.printSegment(.{ .text = line, .style = .{ .fg = if (item.status == .done) .{ .index = 8 } else .default, .reverse = model.focus == .tasks and index == model.selected } }, .{ .row_offset = row, .wrap = .none });
-        row += 1;
-    }
-    if (state.tasks.items.len == 0) _ = center.printSegment(.{ .text = "Taskはありません" }, .{ .row_offset = 2 });
 
     _ = detail.printSegment(.{ .text = "Details" }, .{ .wrap = .none });
-    if (model.focus == .issues and model.selected_issue < state.issues.items.len) {
-        const issue = state.issues.items[model.selected_issue];
-        const text = std.fmt.allocPrint(allocator, "{s}#{d}\n\n{s}\n\nStatus: {s}\n\n{s}", .{ issue.key.repository, issue.key.issue_number, issue.title, @tagName(issue.status), issue.body }) catch return;
-        _ = detail.printSegment(.{ .text = text }, .{ .row_offset = 2, .wrap = .word });
-    } else if (model.selectedTaskId(ordered_ids)) |id| if (findTask(state, id)) |selected| {
-        const text = std.fmt.allocPrint(allocator, "Task #{d}\n\n{s}\n\nStatus: {s}", .{ selected.id, selected.title, @tagName(selected.status) }) catch return;
-        _ = detail.printSegment(.{ .text = text }, .{ .row_offset = 2, .wrap = .word });
-    };
+    drawDetails(allocator, detail, state, rows, model.selected, model.detail_scroll);
     const footer_text = if (model.message_len != 0) model.messageSlice() else switch (model.mode) {
-        .normal => "NORMAL  Tab:ペイン j/k:移動 a/e/d:Task p:Proposal c:Repositories ?:help q:終了",
+        .normal => "NORMAL  Enter:展開 Space:完了 R:移動 d:削除 C:全削除 a/e:Task p:Proposal Tab:ペイン q:終了",
         .add => "ADD  タイトルを入力 Enter:保存 Esc:取消",
         .edit => "EDIT  タイトルを入力 Enter:保存 Esc:取消",
+        .task_reparent => "REPARENT  root / unlinked / Task ID / owner/repo#番号 Enter:保存 Esc:取消",
         .search => "SEARCH  絞込み文字列を入力 Enter:適用 Esc:取消",
         .repositories => "REPOSITORIES  j/k:選択 a:追加 e:Workspace変更 d:削除 Esc:戻る",
         .repository_add => "REPOSITORY ADD  owner/repo /absolute/workspace Enter:保存 Esc:取消",
         .repository_workspace => "WORKSPACE  絶対pathを入力 Enter:保存 Esc:取消",
         .confirm_repository_delete => "DELETE REPOSITORY  y:削除 Esc:取消",
         .confirm_delete => "DELETE  s:部分木削除 p:子を昇格 Esc:取消",
+        .confirm_clear => "CLEAR ALL TASKS  y:全削除 Esc:取消",
         .help => "HELP",
         .proposal => "PROPOSAL  j/k:選択 a/e/d:編集 J/K:移動 R:親変更 g:生成 A:承認 D:破棄",
         .proposal_running => "GENERATING  fxがWorkspaceを調査しています Esc:中断",
@@ -253,6 +240,7 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
     _ = footer.printSegment(.{ .text = footer_text }, .{ .row_offset = 1, .wrap = .none });
 
     if (model.mode == .add or model.mode == .edit) drawDialog(screen, "Task title", model.inputSlice());
+    if (model.mode == .task_reparent) drawDialog(screen, "Move Task", model.inputSlice());
     if (model.mode == .search) drawDialog(screen, "Search tasks", model.inputSlice());
     if (model.mode == .repository_add) drawDialog(screen, "Add repository", model.inputSlice());
     if (model.mode == .repository_workspace) drawDialog(screen, "Workspace path", model.inputSlice());
@@ -260,7 +248,16 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
     if (model.mode == .proposal_edit) drawDialog(screen, "Candidate title", model.inputSlice());
     if (model.mode == .proposal_add) drawDialog(screen, "New candidate title", model.inputSlice());
     if (model.mode == .proposal_reparent) drawDialog(screen, "Parent candidate ID", model.inputSlice());
-    if (model.mode == .confirm_delete) drawDialog(screen, "Taskを削除します", "s: subtree / p: promote children");
+    if (model.mode == .confirm_delete) if (selectedTreeTask(rows, model.selected)) |id| {
+        const children = directChildCount(state, id);
+        const descendants = descendantCount(state, id);
+        const body = std.fmt.allocPrint(allocator, "Task #{d}\n子を昇格: {d}件 / 部分木削除: {d}件\np: promote / s: subtree / Esc: cancel", .{ id, children, descendants + 1 }) catch "p: promote / s: subtree / Esc: cancel";
+        drawDialog(screen, "Task削除の影響", body);
+    };
+    if (model.mode == .confirm_clear) {
+        const body = std.fmt.allocPrint(allocator, "全Task {d}件を削除します\ny: confirm / Esc: cancel", .{state.tasks.items.len}) catch "y: confirm / Esc: cancel";
+        drawDialog(screen, "全Task削除", body);
+    }
     if (model.mode == .confirm_proposal_delete) drawDialog(screen, "候補を削除します", "y: confirm / Esc: cancel");
     if (model.mode == .confirm_proposal_approve) drawDialog(screen, "ProposalをTaskへ追加します", "y: confirm / Esc: cancel");
     if (model.mode == .confirm_proposal_duplicates) drawDialog(screen, "同一タイトルのTaskが存在します", "y: add anyway / Esc: cancel");
@@ -377,57 +374,90 @@ fn selectedIssue(state: *const @import("../core/state.zig").StateRoot, index: us
     return state.issues.items[index].key;
 }
 
-fn handleMouse(model: *Model, mouse: vaxis.Mouse, width: u16, height: u16, issue_count: usize, task_count: usize) void {
+fn handleMouse(model: *Model, mouse: vaxis.Mouse, width: u16, height: u16, row_count: usize) void {
     if (mouse.button == .wheel_down) {
-        if (model.focus == .issues) {
-            if (model.selected_issue < issue_count) model.selected_issue += 1;
-        } else if (model.focus == .tasks) model.moveDown(task_count);
+        if (model.focus == .tree) model.moveDown(row_count);
         return;
     }
     if (mouse.button == .wheel_up) {
-        if (model.focus == .issues) model.selected_issue -|= 1 else if (model.focus == .tasks) model.moveUp();
+        if (model.focus == .tree) model.moveUp();
         return;
     }
     if (mouse.button != .left or mouse.type != .press or mouse.row < 3) return;
     const row: usize = @intCast(mouse.row - 3);
-    const compact = width < 90;
-    if (!compact) {
-        const left_width = @max(@as(u16, 20), width / 4);
-        const detail_width = @max(@as(u16, 24), width / 4);
-        if (mouse.col < left_width) model.focus = .issues else if (mouse.col < width - detail_width) model.focus = .tasks else model.focus = .details;
-    }
+    model.focus = if (mouse.col < width / 2) .tree else .details;
     const visible: usize = @max(@as(usize, 1), height -| 7);
-    if (model.focus == .issues) {
-        const offset = if (model.selected_issue >= visible) model.selected_issue - visible + 1 else 0;
-        model.selected_issue = @min(offset + row, issue_count);
-        model.selected = 0;
-    } else if (model.focus == .tasks and task_count != 0) {
+    if (model.focus == .tree and row_count != 0) {
         const offset = if (model.selected >= visible) model.selected - visible + 1 else 0;
-        model.selected = @min(offset + row, task_count - 1);
+        model.selected = @min(offset + row, row_count - 1);
     }
 }
 
-fn handleIssueNavigation(model: *Model, key: vaxis.Key, issue_count: usize) void {
-    const count = issue_count + 1;
+fn handleTreeKey(model: *Model, key: vaxis.Key, state: *@import("../core/state.zig").StateRoot, rows: []const TreeRow, service: Service) !void {
     if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-        if (model.selected_issue + 1 < count) model.selected_issue += 1;
-        model.selected = 0;
-    } else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-        model.selected_issue -|= 1;
-        model.selected = 0;
+        model.moveDown(rows.len);
+        model.detail_scroll = 0;
+        return;
     }
-}
-
-fn handleTaskKey(model: *Model, key: vaxis.Key, state: *@import("../core/state.zig").StateRoot, ordered_ids: []const u64, issue: ?task_mod.IssueKey, service: Service) !void {
-    if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) return model.moveDown(ordered_ids.len);
-    if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) return model.moveUp();
+    if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+        model.moveUp();
+        model.detail_scroll = 0;
+        return;
+    }
+    if (model.selected >= rows.len) return;
+    const selected_row = rows[model.selected];
+    if (key.matches(vaxis.Key.enter, .{})) return switch (selected_row) {
+        .issue => |index| try model.toggleIssue(service.allocator, index),
+        .unlinked => model.expanded_unlinked = !model.expanded_unlinked,
+        .task => |task_row| try model.toggleTask(service.allocator, task_row.id),
+    };
     if (key.matches('a', .{})) return model.beginInput(.add, "");
-    const id = model.selectedTaskId(ordered_ids) orelse return;
+    if (key.matches('C', .{})) {
+        model.mode = .confirm_clear;
+        return;
+    }
+    const id = selectedTreeTask(rows, model.selected) orelse return;
     const selected = findTask(state, id) orelse return;
-    if (key.matches(' ', .{})) try service.toggle(state, id) else if (key.matches('e', .{})) model.beginInput(.edit, selected.title) else if (key.matches('d', .{})) model.mode = .confirm_delete else if (key.matches('K', .{}) and selected.position > 0) try service.moveTask(state, id, selected.position) else if (key.matches('J', .{})) service.moveTask(state, id, selected.position + 2) catch |err| setError(model, err) else if (key.matches('U', .{})) try service.reparentTask(state, id, null, null) else if (key.matches('L', .{}) and issue != null) try service.reparentTask(state, id, null, issue);
+    const issue = selected.issue_key;
+    if (key.matches(' ', .{})) try service.toggle(state, id) else if (key.matches('e', .{})) model.beginInput(.edit, selected.title) else if (key.matches('R', .{})) model.beginInput(.task_reparent, "") else if (key.matches('d', .{})) model.mode = .confirm_delete else if (key.matches('K', .{}) and selected.position > 0) try service.moveTask(state, id, selected.position) else if (key.matches('J', .{})) service.moveTask(state, id, selected.position + 2) catch |err| setError(model, err) else if (key.matches('U', .{})) try service.reparentTask(state, id, null, null) else if (key.matches('L', .{}) and issue != null) try service.reparentTask(state, id, null, issue);
 }
 
-fn handleInput(model: *Model, key: vaxis.Key, state: *@import("../core/state.zig").StateRoot, ordered_ids: []const u64, service: Service) !void {
+fn handleDetailKey(model: *Model, key: vaxis.Key) void {
+    if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) model.detail_scroll += 1 else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) model.detail_scroll -|= 1 else if (key.matches('g', .{})) model.detail_scroll = 0;
+}
+
+fn applyTaskDestination(service: Service, state: *@import("../core/state.zig").StateRoot, id: u64, input: []const u8) !void {
+    const destination = std.mem.trim(u8, input, " \t\r\n");
+    const selected = findTask(state, id) orelse return error.TaskNotFound;
+    if (std.mem.eql(u8, destination, "root")) return service.reparentTask(state, id, null, selected.issue_key);
+    if (std.mem.eql(u8, destination, "unlinked")) return service.reparentTask(state, id, null, null);
+    if (std.mem.indexOfScalar(u8, destination, '#')) |hash| {
+        const number = try std.fmt.parseInt(u64, destination[hash + 1 ..], 10);
+        const issue = task_mod.IssueKey{ .repository = destination[0..hash], .issue_number = number };
+        try task_mod.validateIssueKey(issue);
+        return service.reparentTask(state, id, null, issue);
+    }
+    const parent = try std.fmt.parseInt(u64, destination, 10);
+    return service.reparentTask(state, id, parent, null);
+}
+
+fn directChildCount(state: *const @import("../core/state.zig").StateRoot, id: u64) usize {
+    var count: usize = 0;
+    for (state.tasks.items) |item| if (item.parent_id == id) {
+        count += 1;
+    };
+    return count;
+}
+
+fn descendantCount(state: *const @import("../core/state.zig").StateRoot, id: u64) usize {
+    var count: usize = 0;
+    for (state.tasks.items) |item| if (item.parent_id == id) {
+        count += 1 + descendantCount(state, item.id);
+    };
+    return count;
+}
+
+fn handleInput(model: *Model, key: vaxis.Key, state: *@import("../core/state.zig").StateRoot, selected_task: ?u64, service: Service) !void {
     if (key.matches(vaxis.Key.escape, .{})) {
         model.mode = switch (model.mode) {
             .proposal_add, .proposal_edit, .proposal_reparent => .proposal,
@@ -441,7 +471,8 @@ fn handleInput(model: *Model, key: vaxis.Key, state: *@import("../core/state.zig
         const completed_mode = model.mode;
         switch (completed_mode) {
             .add => _ = try service.addTask(state, title, selectedIssue(state, model.selected_issue), null),
-            .edit => if (model.selectedTaskId(ordered_ids)) |id| try service.editTask(state, id, title),
+            .edit => if (selected_task) |id| try service.editTask(state, id, title),
+            .task_reparent => if (selected_task) |id| try applyTaskDestination(service, state, id, title),
             .search => {
                 model.filter_len = @min(title.len, model.filter.len);
                 @memcpy(model.filter[0..model.filter_len], title[0..model.filter_len]);
@@ -643,6 +674,183 @@ fn handleProposalConfirmation(service: Service, model: *Model, state: *@import("
     }
 }
 
+fn visibleTreeRows(allocator: std.mem.Allocator, state: *const @import("../core/state.zig").StateRoot, model: *const Model, filter: []const u8) ![]TreeRow {
+    var rows: std.ArrayList(TreeRow) = .empty;
+    errdefer rows.deinit(allocator);
+    for (state.issues.items, 0..) |_, index| {
+        try rows.append(allocator, .{ .issue = index });
+        if (model.issueExpanded(index) or filter.len != 0) try appendVisibleTasks(allocator, &rows, state, model, state.issues.items[index].key, null, 1, filter);
+    }
+    try rows.append(allocator, .unlinked);
+    if (model.expanded_unlinked or filter.len != 0) try appendVisibleTasks(allocator, &rows, state, model, null, null, 1, filter);
+    return rows.toOwnedSlice(allocator);
+}
+
+fn appendVisibleTasks(allocator: std.mem.Allocator, rows: *std.ArrayList(TreeRow), state: *const @import("../core/state.zig").StateRoot, model: *const Model, issue: ?task_mod.IssueKey, parent: ?u64, depth: usize, filter: []const u8) !void {
+    const ids = try tree.preorder(allocator, state, issue);
+    defer allocator.free(ids);
+    for (ids) |id| {
+        const item = findTask(state, id) orelse continue;
+        if (item.parent_id != parent) continue;
+        const matches = filter.len == 0 or subtreeMatches(state, id, filter);
+        if (matches) try rows.append(allocator, .{ .task = .{ .id = id, .depth = depth } });
+        if (matches and (filter.len != 0 or model.taskExpanded(id))) try appendVisibleTasks(allocator, rows, state, model, issue, id, depth + 1, filter);
+    }
+}
+
+fn subtreeMatches(state: *const @import("../core/state.zig").StateRoot, id: u64, filter: []const u8) bool {
+    const item = findTask(state, id) orelse return false;
+    if (containsIgnoreCase(item.title, filter)) return true;
+    for (state.tasks.items) |child| if (child.parent_id == id and subtreeMatches(state, child.id, filter)) return true;
+    return false;
+}
+
+fn selectedTreeTask(rows: []const TreeRow, index: usize) ?u64 {
+    if (index >= rows.len) return null;
+    return switch (rows[index]) {
+        .task => |item| item.id,
+        else => null,
+    };
+}
+
+fn syncSelection(model: *Model, state: *const @import("../core/state.zig").StateRoot, rows: []const TreeRow) void {
+    if (model.selected >= rows.len) return;
+    switch (rows[model.selected]) {
+        .issue => |index| model.selected_issue = index,
+        .unlinked => model.selected_issue = state.issues.items.len,
+        .task => |row| if (findTask(state, row.id)) |item| {
+            if (item.issue_key) |key| {
+                for (state.issues.items, 0..) |issue, index| if (issue.key.eql(key)) {
+                    model.selected_issue = index;
+                    break;
+                };
+            } else model.selected_issue = state.issues.items.len;
+        },
+    }
+}
+
+fn hasChildren(state: *const @import("../core/state.zig").StateRoot, id: u64) bool {
+    for (state.tasks.items) |item| if (item.parent_id == id) return true;
+    return false;
+}
+
+fn treeRowText(allocator: std.mem.Allocator, state: *const @import("../core/state.zig").StateRoot, model: *const Model, row: TreeRow) ![]const u8 {
+    return switch (row) {
+        .issue => |index| blk: {
+            const issue = state.issues.items[index];
+            break :blk try std.fmt.allocPrint(allocator, "{s} {s}#{d} [{s}] {s}", .{ if (model.issueExpanded(index)) "▾" else "▸", issue.key.repository, issue.key.issue_number, @tagName(issue.status), issue.title });
+        },
+        .unlinked => try std.fmt.allocPrint(allocator, "{s} Unlinked", .{if (model.expanded_unlinked) "▾" else "▸"}),
+        .task => |task_row| blk: {
+            const item = findTask(state, task_row.id) orelse break :blk "";
+            const indent = try treePrefix(allocator, state, item, task_row.depth);
+            const marker = if (hasChildren(state, item.id)) (if (model.taskExpanded(item.id)) "▾" else "▸") else " ";
+            break :blk try std.fmt.allocPrint(allocator, "{s}{s} {s} {d}: {s}", .{ indent, marker, if (item.status == .done) "[x]" else "[ ]", item.id, item.title });
+        },
+    };
+}
+
+fn treePrefix(allocator: std.mem.Allocator, state: *const @import("../core/state.zig").StateRoot, item: task_mod.Task, depth: usize) ![]const u8 {
+    if (depth == 0) return "";
+    const chain = try allocator.alloc(u64, depth);
+    defer allocator.free(chain);
+    var current = item;
+    var index = depth;
+    while (index > 0) {
+        index -= 1;
+        chain[index] = current.id;
+        if (index != 0) current = findTask(state, current.parent_id orelse break) orelse break;
+    }
+
+    var prefix: std.ArrayList(u8) = .empty;
+    for (chain, 0..) |id, level| {
+        const node = findTask(state, id) orelse continue;
+        const last = isLastSibling(state, node);
+        if (level + 1 == chain.len) {
+            try prefix.appendSlice(allocator, if (last) "└─" else "├─");
+        } else {
+            try prefix.appendSlice(allocator, if (last) "  " else "│ ");
+        }
+    }
+    return prefix.toOwnedSlice(allocator);
+}
+
+fn isLastSibling(state: *const @import("../core/state.zig").StateRoot, item: task_mod.Task) bool {
+    for (state.tasks.items) |other| {
+        if (other.position > item.position and other.parent_id == item.parent_id and state_mod.optionalKeyEql(other.issue_key, item.issue_key)) return false;
+    }
+    return true;
+}
+
+fn treeRowStyle(state: *const @import("../core/state.zig").StateRoot, row: TreeRow, selected: bool) vaxis.Style {
+    const color: vaxis.Color = switch (row) {
+        .issue => |index| .{ .index = switch (state.issues.items[index].status) {
+            .open => 2,
+            .closed => 8,
+            .deleted => 1,
+            .unavailable => 3,
+        } },
+        .task => |task_row| if ((findTask(state, task_row.id) orelse return .{ .reverse = selected }).status == .done) .{ .index = 8 } else .default,
+        .unlinked => .default,
+    };
+    return .{ .fg = color, .reverse = selected };
+}
+
+fn drawDetails(allocator: std.mem.Allocator, detail: vaxis.Window, state: *const @import("../core/state.zig").StateRoot, rows: []const TreeRow, selected_index: usize, scroll: usize) void {
+    if (selected_index >= rows.len) return;
+    const text = switch (rows[selected_index]) {
+        .issue => |index| issueDetails(allocator, state, index) catch return,
+        .unlinked => unlinkedDetails(allocator, state) catch return,
+        .task => |row| taskDetails(allocator, state, row.id) catch return,
+    };
+    var visible = text;
+    var skipped: usize = 0;
+    while (skipped < scroll) : (skipped += 1) {
+        const newline = std.mem.indexOfScalar(u8, visible, '\n') orelse {
+            visible = "";
+            break;
+        };
+        visible = visible[newline + 1 ..];
+    }
+    _ = detail.printSegment(.{ .text = visible }, .{ .row_offset = 2, .col_offset = 1, .wrap = .word });
+}
+
+fn issueDetails(allocator: std.mem.Allocator, state: *const @import("../core/state.zig").StateRoot, index: usize) ![]const u8 {
+    const issue = state.issues.items[index];
+    var total: usize = 0;
+    var done: usize = 0;
+    for (state.tasks.items) |item| if (state_mod.optionalKeyEql(item.issue_key, issue.key)) {
+        total += 1;
+        if (item.status == .done) done += 1;
+    };
+    const fetched = if (issue.last_fetched_at) |value| try std.fmt.allocPrint(allocator, "{d}", .{value}) else "未取得";
+    const last_error = if (issue.last_error) |value| @tagName(value) else "なし";
+    return std.fmt.allocPrint(allocator, "Issue\n\nRepository: {s}\nNumber:     #{d}\nStatus:     {s}\nUpdated:    {s}\nTasks:      {d} total / {d} completed\nLast error: {s}\n\nTitle\n{s}\n\nDescription\n{s}", .{ issue.key.repository, issue.key.issue_number, @tagName(issue.status), fetched, total, done, last_error, issue.title, issue.body });
+}
+
+fn unlinkedDetails(allocator: std.mem.Allocator, state: *const @import("../core/state.zig").StateRoot) ![]const u8 {
+    var total: usize = 0;
+    var done: usize = 0;
+    for (state.tasks.items) |item| if (item.issue_key == null) {
+        total += 1;
+        if (item.status == .done) done += 1;
+    };
+    return std.fmt.allocPrint(allocator, "Unlinked Tasks\n\nIssueに紐付いていないTask\n\nTasks: {d} total / {d} completed", .{ total, done });
+}
+
+fn taskDetails(allocator: std.mem.Allocator, state: *const @import("../core/state.zig").StateRoot, id: u64) ![]const u8 {
+    const item = findTask(state, id) orelse return error.TaskNotFound;
+    const issue = if (item.issue_key) |key| try std.fmt.allocPrint(allocator, "{s}#{d}", .{ key.repository, key.issue_number }) else "Unlinked";
+    const parent = if (item.parent_id) |parent_id| if (findTask(state, parent_id)) |parent_task| try std.fmt.allocPrint(allocator, "#{d} {s}", .{ parent_id, parent_task.title }) else "不明" else "Root";
+    var direct: usize = 0;
+    var done: usize = 0;
+    for (state.tasks.items) |child| if (child.parent_id == id) {
+        direct += 1;
+        if (child.status == .done) done += 1;
+    };
+    return std.fmt.allocPrint(allocator, "Task #{d}\n\nStatus:   {s}\nIssue:    {s}\nParent:   {s}\nOrder:    {d}\nDepth:    {d}\nChildren: {d} / {d} completed\n\nTitle\n{s}", .{ item.id, @tagName(item.status), issue, parent, item.position + 1, tree.depth(state, id) catch 0, direct, done, item.title });
+}
+
 fn taskOrder(allocator: std.mem.Allocator, state: *const @import("../core/state.zig").StateRoot, issue: ?task_mod.IssueKey, filter: []const u8) ![]u64 {
     var result: std.ArrayList(u64) = .empty;
     errdefer result.deinit(allocator);
@@ -708,12 +916,106 @@ test "task order follows the selected issue and search filter" {
     try std.testing.expectEqualSlices(u64, &.{2}, filtered);
 }
 
+test "tree starts folded and expands issue and child task one level at a time" {
+    const a = std.testing.allocator;
+    var state = @import("../core/state.zig").StateRoot.init(a);
+    defer state.deinit();
+    try state.issues.append(a, .{ .key = .{ .repository = try a.dupe(u8, "a/b"), .issue_number = 1 }, .title = try a.dupe(u8, "Issue"), .body = try a.dupe(u8, "") });
+    const root = try state.addTask("root", .{ .repository = "a/b", .issue_number = 1 }, null);
+    const child = try state.addTask("child", .{ .repository = "a/b", .issue_number = 1 }, root);
+    var model: Model = .{};
+    defer model.deinit(a);
+
+    const folded = try visibleTreeRows(a, &state, &model, "");
+    defer a.free(folded);
+    try std.testing.expectEqual(@as(usize, 2), folded.len);
+
+    try model.toggleIssue(a, 0);
+    const issue_open = try visibleTreeRows(a, &state, &model, "");
+    defer a.free(issue_open);
+    try std.testing.expectEqual(@as(usize, 3), issue_open.len);
+
+    try model.toggleTask(a, root);
+    const task_open = try visibleTreeRows(a, &state, &model, "");
+    defer a.free(task_open);
+    try std.testing.expectEqual(@as(usize, 4), task_open.len);
+
+    const sibling = try state.addTask("sibling", .{ .repository = "a/b", .issue_number = 1 }, null);
+    const root_prefix = try treePrefix(a, &state, findTask(&state, root).?, 1);
+    defer a.free(root_prefix);
+    try std.testing.expectEqualStrings("├─", root_prefix);
+    const child_prefix = try treePrefix(a, &state, findTask(&state, child).?, 2);
+    defer a.free(child_prefix);
+    try std.testing.expectEqualStrings("│ └─", child_prefix);
+    const sibling_prefix = try treePrefix(a, &state, findTask(&state, sibling).?, 1);
+    defer a.free(sibling_prefix);
+    try std.testing.expectEqualStrings("└─", sibling_prefix);
+}
+
 test "mouse selects panes rows and scrolls" {
     var model: Model = .{};
-    handleMouse(&model, .{ .col = 1, .row = 4, .button = .left, .type = .press, .mods = .{} }, 120, 30, 4, 10);
-    try std.testing.expectEqual(Model.Focus.issues, model.focus);
-    try std.testing.expectEqual(@as(usize, 1), model.selected_issue);
-    model.focus = .tasks;
-    handleMouse(&model, .{ .col = 40, .row = 4, .button = .wheel_down, .type = .press, .mods = .{} }, 120, 30, 4, 10);
+    handleMouse(&model, .{ .col = 1, .row = 4, .button = .left, .type = .press, .mods = .{} }, 120, 30, 10);
+    try std.testing.expectEqual(Model.Focus.tree, model.focus);
     try std.testing.expectEqual(@as(usize, 1), model.selected);
+    handleMouse(&model, .{ .col = 40, .row = 4, .button = .wheel_down, .type = .press, .mods = .{} }, 120, 30, 10);
+    try std.testing.expectEqual(@as(usize, 2), model.selected);
+}
+
+test "search reveals matching descendants with their ancestors" {
+    const a = std.testing.allocator;
+    var state = @import("../core/state.zig").StateRoot.init(a);
+    defer state.deinit();
+    try state.issues.append(a, .{ .key = .{ .repository = try a.dupe(u8, "a/b"), .issue_number = 1 }, .title = try a.dupe(u8, "Issue"), .body = try a.dupe(u8, "") });
+    const root = try state.addTask("parent", .{ .repository = "a/b", .issue_number = 1 }, null);
+    _ = try state.addTask("needle", .{ .repository = "a/b", .issue_number = 1 }, root);
+    var model: Model = .{};
+    const rows = try visibleTreeRows(a, &state, &model, "needle");
+    defer a.free(rows);
+    try std.testing.expectEqual(@as(usize, 4), rows.len);
+}
+
+test "details scroll independently" {
+    var model: Model = .{};
+    model.focus = .details;
+    handleDetailKey(&model, .{ .codepoint = 'j' });
+    try std.testing.expectEqual(@as(usize, 1), model.detail_scroll);
+    handleDetailKey(&model, .{ .codepoint = 'g' });
+    try std.testing.expectEqual(@as(usize, 0), model.detail_scroll);
+}
+
+test "task destination supports parent issue root and unlinked" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const a = std.testing.allocator;
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(base);
+    const path = try std.fs.path.join(a, &.{ base, "state.json" });
+    defer a.free(path);
+    var state = @import("../core/state.zig").StateRoot.init(a);
+    defer state.deinit();
+    try state.issues.append(a, .{ .key = .{ .repository = try a.dupe(u8, "a/b"), .issue_number = 1 }, .title = try a.dupe(u8, "one"), .body = try a.dupe(u8, "") });
+    try state.issues.append(a, .{ .key = .{ .repository = try a.dupe(u8, "a/b"), .issue_number = 2 }, .title = try a.dupe(u8, "two"), .body = try a.dupe(u8, "") });
+    const parent = try state.addTask("parent", .{ .repository = "a/b", .issue_number = 1 }, null);
+    const child = try state.addTask("child", .{ .repository = "a/b", .issue_number = 1 }, null);
+    const service = Service{ .allocator = a, .io = std.testing.io, .state_path = path };
+    var parent_text: [32]u8 = undefined;
+    try applyTaskDestination(service, &state, child, try std.fmt.bufPrint(&parent_text, "{d}", .{parent}));
+    try std.testing.expectEqual(parent, findTask(&state, child).?.parent_id.?);
+    try applyTaskDestination(service, &state, child, "a/b#2");
+    try std.testing.expect(findTask(&state, child).?.parent_id == null);
+    try std.testing.expect(findTask(&state, child).?.issue_key.?.eql(.{ .repository = "a/b", .issue_number = 2 }));
+    try applyTaskDestination(service, &state, child, "unlinked");
+    try std.testing.expect(findTask(&state, child).?.issue_key == null);
+}
+
+test "delete impact counts direct children and complete subtree" {
+    const a = std.testing.allocator;
+    var state = @import("../core/state.zig").StateRoot.init(a);
+    defer state.deinit();
+    const root = try state.addTask("root", null, null);
+    const child = try state.addTask("child", null, root);
+    _ = try state.addTask("grandchild", null, child);
+    _ = try state.addTask("sibling", null, root);
+    try std.testing.expectEqual(@as(usize, 2), directChildCount(&state, root));
+    try std.testing.expectEqual(@as(usize, 3), descendantCount(&state, root));
 }

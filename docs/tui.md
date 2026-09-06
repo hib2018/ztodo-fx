@@ -1,19 +1,23 @@
 # TUI操作
 
-`zt`を引数なしで実行するとTUIが起動します。`Tab`と`Shift-Tab`でIssue、Task、詳細ペインを移動し、`j`/`k`または矢印キーで項目を選択します。
-横幅90未満ではフォーカス中のペインだけを表示し、`Tab`でIssue、Task、詳細を切り替えます。
-マウスクリックでもペインと行を選択でき、ホイールでIssueまたはTaskを移動できます。Issue状態と完了Taskは色分けされます。
+`zt`を引数なしで実行するとTUIが起動します。画面はIssue・Taskツリーと詳細の2ペインで、幅は左右半分ずつです。`Tab`と`Shift-Tab`でペインを移動し、`j`/`k`または矢印キーでツリー項目を選択します。
+Issueを親、そのTaskと子Taskを子孫として表示します。起動時はすべて折り畳まれており、`Enter`で選択項目を展開・折り畳みできます。Issueに紐付かないTaskは`Unlinked`の配下に表示されます。
+マウスクリックでもペインと行を選択でき、ホイールでツリーを移動できます。Issue状態と完了Taskは色分けされます。詳細ペインには、選択したIssueまたはTaskに応じた情報が表示されます。
+詳細ペインへフォーカスした状態では`j`/`k`または矢印キーで内容を上下にスクロールし、`g`で先頭へ戻ります。
 
 ## Task
 
 | キー | 操作 |
 |---|---|
+| `Enter` | Issue、Unlinked、子を持つTaskを展開／折り畳みする |
 | `Space` | 完了状態を切り替える |
 | `a` | 選択中IssueへTaskを追加する |
 | `e` | Taskタイトルを編集する |
+| `R` | 移動先を指定する。`root`、`unlinked`、親Task ID、`owner/repo#番号`を入力 |
 | `J` / `K` | 兄弟内で下／上へ移動する |
 | `L` / `U` | 選択中Issueへlink／unlinkする |
 | `d` | 削除方針の確認を開く |
+| `C` | 全Taskの件数を確認して消去する |
 | `/` | 表示中IssueのTaskをタイトルで絞り込む。空入力で解除 |
 | `s` | 確認画面でsubtreeを削除する |
 | `p` | 確認画面で子を昇格して削除する |
@@ -22,7 +26,7 @@
 
 ## IssueとProposal
 
-Issueペインの`r`で選択RepositoryのIssueを更新します。`p`で選択IssueのProposal画面を開きます。
+ツリー上のIssueまたはそのTaskを選択し、`r`で選択RepositoryのIssueを更新します。`p`でそのIssueのProposal画面を開きます。
 
 | キー | Proposal操作 |
 |---|---|

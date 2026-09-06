@@ -288,3 +288,13 @@ Foundational完了後は、fx/Proposal、tree renderer、Task mutation、GitHub 
 - 実ネットワーク、認証、モデル応答は通常test suiteから分離する。
 - 既存ztodoのsourceは設計参照に限り、保存ファイルを読込・移行する実装は追加しない。
 - 各checkpointで停止してstoryを独立検証できる。
+
+---
+
+## Phase 8: Convergence
+
+- [X] T074 TUIの統合ツリー上でTaskを親Task・Issue・Unlinkedへ明示的に移動できる操作と回帰テストを追加する `src/tui/app.zig`、`src/tui/model.zig` per FR-005/FR-007/FR-010 (partial)
+- [X] T075 Task検索時に一致項目のIssue rootと祖先Taskを保持し、一致箇所まで展開したtree projectionのテストを追加する `src/tui/app.zig` per FR-009 (partial)
+- [X] T076 Detailsペインへ独立スクロールを追加し、長いIssue本文とTask情報を末尾まで閲覧できるテストと操作文書を追加する `src/tui/app.zig`、`src/tui/model.zig`、`docs/tui.md` per FR-002 (partial)
+- [X] T077 TUIの展開状態から固定Issue・Task件数上限を除き、任意の有限階層を扱える所有権とテストを追加する `src/tui/model.zig`、`src/tui/app.zig` per FR-006 (partial)
+- [X] T078 TUIのTask削除確認に対象・子孫・昇格の影響を表示し、全Task消去を件数付き確認から実行できる操作とテストを追加する `src/tui/app.zig` per FR-004/FR-013 (partial)

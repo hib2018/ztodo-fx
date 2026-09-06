@@ -1,18 +1,19 @@
 const std = @import("std");
-const state_mod = @import("../core/state.zig");
 
 pub const Model = struct {
-    pub const Focus = enum { issues, tasks, details };
+    pub const Focus = enum { tree, details };
     pub const Mode = enum {
         normal,
         add,
         edit,
+        task_reparent,
         search,
         repositories,
         repository_add,
         repository_workspace,
         confirm_repository_delete,
         confirm_delete,
+        confirm_clear,
         help,
         proposal,
         proposal_running,
@@ -29,7 +30,7 @@ pub const Model = struct {
     selected_issue: usize = 0,
     selected_candidate: usize = 0,
     selected_repository: usize = 0,
-    focus: Focus = .tasks,
+    focus: Focus = .tree,
     mode: Mode = .normal,
     input: [800]u8 = undefined,
     input_len: usize = 0,
@@ -37,6 +38,15 @@ pub const Model = struct {
     filter_len: usize = 0,
     message: [256]u8 = undefined,
     message_len: usize = 0,
+    expanded_issues: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    expanded_unlinked: bool = false,
+    expanded_tasks: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    detail_scroll: usize = 0,
+
+    pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
+        self.expanded_issues.deinit(allocator);
+        self.expanded_tasks.deinit(allocator);
+    }
 
     pub fn moveDown(self: *Model, count: usize) void {
         if (count != 0 and self.selected + 1 < count) self.selected += 1;
@@ -46,25 +56,34 @@ pub const Model = struct {
         self.selected -|= 1;
     }
 
-    pub fn selectedTaskId(self: Model, ordered_ids: []const u64) ?u64 {
-        if (self.selected >= ordered_ids.len) return null;
-        return ordered_ids[self.selected];
-    }
-
     pub fn nextFocus(self: *Model) void {
         self.focus = switch (self.focus) {
-            .issues => .tasks,
-            .tasks => .details,
-            .details => .issues,
+            .tree => .details,
+            .details => .tree,
         };
     }
 
     pub fn previousFocus(self: *Model) void {
         self.focus = switch (self.focus) {
-            .issues => .details,
-            .tasks => .issues,
-            .details => .tasks,
+            .tree => .details,
+            .details => .tree,
         };
+    }
+
+    pub fn issueExpanded(self: *const Model, index: usize) bool {
+        return self.expanded_issues.contains(index);
+    }
+
+    pub fn toggleIssue(self: *Model, allocator: std.mem.Allocator, index: usize) !void {
+        if (!self.expanded_issues.remove(index)) try self.expanded_issues.put(allocator, index, {});
+    }
+
+    pub fn taskExpanded(self: *const Model, id: u64) bool {
+        return self.expanded_tasks.contains(id);
+    }
+
+    pub fn toggleTask(self: *Model, allocator: std.mem.Allocator, id: u64) !void {
+        if (!self.expanded_tasks.remove(id)) try self.expanded_tasks.put(allocator, id, {});
     }
 
     pub fn beginInput(self: *Model, mode: Mode, initial: []const u8) void {
@@ -111,10 +130,22 @@ test "selection remains within task list" {
     model.moveUp();
     model.moveUp();
     try std.testing.expectEqual(@as(usize, 0), model.selected);
-    try std.testing.expectEqual(@as(?u64, 7), model.selectedTaskId(&.{ 7, 8 }));
     model.nextFocus();
     try std.testing.expectEqual(Model.Focus.details, model.focus);
     model.beginInput(.add, "日本語");
     model.backspace();
     try std.testing.expectEqualStrings("日本", model.inputSlice());
+}
+
+test "expanded nodes have no fixed item limit" {
+    const allocator = std.testing.allocator;
+    var model: Model = .{};
+    defer model.deinit(allocator);
+    var index: usize = 0;
+    while (index < 1500) : (index += 1) {
+        try model.toggleIssue(allocator, index);
+        try model.toggleTask(allocator, @intCast(index + 1));
+    }
+    try std.testing.expect(model.issueExpanded(1499));
+    try std.testing.expect(model.taskExpanded(1500));
 }
