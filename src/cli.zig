@@ -12,6 +12,7 @@ const proposal_apply = @import("proposal/apply.zig");
 const proposal_editor = @import("proposal/editor.zig");
 const generator = @import("proposal/generator.zig");
 const process = @import("platform/process.zig");
+const Service = @import("application/service.zig").Service;
 
 pub const version = build_options.version;
 pub const exit_success: u8 = 0;
@@ -69,6 +70,7 @@ fn handleTask(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
     defer paths_mod.deinit(a, p);
     var s = try store.load(a, io, p.state);
     defer s.deinit();
+    const service = Service{ .allocator = a, .io = io, .state_path = p.state };
     const action = args[2];
     if (std.mem.eql(u8, action, "ls")) {
         const filter: ?task_mod.IssueKey = if (args.len == 5 and std.mem.eql(u8, args[3], "--issue")) try parseIssueKey(args[4]) else if (args.len == 3) null else return error.Usage;
@@ -96,8 +98,7 @@ fn handleTask(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
         }
         const title = try joinArgs(a, args[3..title_end]);
         defer a.free(title);
-        const id = try s.addTask(title, issue, parent);
-        try store.save(a, io, p.state, &s);
+        const id = try service.addTask(&s, title, issue, parent);
         try out.print("Task {d} を追加しました。\n", .{id});
         return;
     }
@@ -106,36 +107,31 @@ fn handleTask(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
         const id = try std.fmt.parseInt(u64, args[3], 10);
         const title = try joinArgs(a, args[4..]);
         defer a.free(title);
-        try s.edit(id, title);
-        try store.save(a, io, p.state, &s);
+        try service.editTask(&s, id, title);
         return;
     }
     if (std.mem.eql(u8, action, "toggle")) {
         if (args.len != 4) return error.Usage;
         const id = try std.fmt.parseInt(u64, args[3], 10);
-        _ = try s.toggle(id);
-        try store.save(a, io, p.state, &s);
+        try service.toggle(&s, id);
         return;
     }
     if (std.mem.eql(u8, action, "move")) {
         if (args.len != 5) return error.Usage;
-        try s.move(try std.fmt.parseInt(u64, args[3], 10), try std.fmt.parseInt(u32, args[4], 10));
-        try store.save(a, io, p.state, &s);
+        try service.moveTask(&s, try std.fmt.parseInt(u64, args[3], 10), try std.fmt.parseInt(u32, args[4], 10));
         return;
     }
     if (std.mem.eql(u8, action, "reparent")) {
         if (args.len < 5) return error.Usage;
         const id = try std.fmt.parseInt(u64, args[3], 10);
-        if (std.mem.eql(u8, args[4], "--parent") and args.len == 6) try s.reparent(id, try std.fmt.parseInt(u64, args[5], 10), null) else if (std.mem.eql(u8, args[4], "--root")) try s.reparent(id, null, null) else return error.Usage;
-        try store.save(a, io, p.state, &s);
+        if (std.mem.eql(u8, args[4], "--parent") and args.len == 6) try service.reparentTask(&s, id, try std.fmt.parseInt(u64, args[5], 10), null) else if (std.mem.eql(u8, args[4], "--root")) try service.reparentTask(&s, id, null, null) else return error.Usage;
         return;
     }
     if (std.mem.eql(u8, action, "link") or std.mem.eql(u8, action, "unlink")) {
         if (args.len < 4) return error.Usage;
         const id = try std.fmt.parseInt(u64, args[3], 10);
         const key: ?task_mod.IssueKey = if (std.mem.eql(u8, action, "link") and args.len == 5) try parseIssueKey(args[4]) else if (std.mem.eql(u8, action, "unlink") and args.len == 4) null else return error.Usage;
-        try s.reparent(id, null, key);
-        try store.save(a, io, p.state, &s);
+        try service.reparentTask(&s, id, null, key);
         return;
     }
     if (std.mem.eql(u8, action, "del")) {
@@ -144,15 +140,14 @@ fn handleTask(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
         const count = try s.subtreeCount(id);
         try out.print("{d}件のTaskに影響します。\n", .{if (hasArg(args, "--subtree")) count else 1});
         try requireConfirmation(io, out, args, "削除しますか？ [y/N] ");
-        if (hasArg(args, "--subtree")) _ = try s.deleteSubtree(id) else if (hasArg(args, "--promote-children")) try s.deletePromote(id) else return error.Usage;
-        try store.save(a, io, p.state, &s);
+        if (!hasArg(args, "--subtree") and !hasArg(args, "--promote-children")) return error.Usage;
+        try service.deleteTask(&s, id, hasArg(args, "--subtree"));
         return;
     }
     if (std.mem.eql(u8, action, "clear")) {
         try out.print("{d}件のTaskを削除します。\n", .{s.tasks.items.len});
         try requireConfirmation(io, out, args, "全Taskを削除しますか？ [y/N] ");
-        _ = s.clearTasks();
-        try store.save(a, io, p.state, &s);
+        _ = try service.clearTasks(&s);
         return;
     }
     return error.Usage;
@@ -239,6 +234,7 @@ fn handleProposal(a: std.mem.Allocator, io: std.Io, env: *const std.process.Envi
     defer paths_mod.deinit(a, p);
     var s = try store.load(a, io, p.state);
     defer s.deinit();
+    const service = Service{ .allocator = a, .io = io, .state_path = p.state };
     const action = args[2];
     const key = try parseIssueKey(args[3]);
     if (std.mem.eql(u8, action, "show")) {
@@ -259,14 +255,13 @@ fn handleProposal(a: std.mem.Allocator, io: std.Io, env: *const std.process.Envi
             return;
         }
         try s.putProposal(working);
-        try store.save(a, io, p.state, &s);
+        try service.persistOrRollback(&s);
         try out.writeAll("Proposalを保存しました。\n");
         return;
     }
     if (std.mem.eql(u8, action, "discard")) {
         try requireConfirmation(io, out, args, "Proposalを破棄しますか？ [y/N] ");
-        if (!s.removeProposal(key)) return error.ProposalNotFound;
-        try store.save(a, io, p.state, &s);
+        try service.discardProposal(&s, key);
         return;
     }
     if (std.mem.eql(u8, action, "approve")) {
@@ -274,8 +269,7 @@ fn handleProposal(a: std.mem.Allocator, io: std.Io, env: *const std.process.Envi
         const warnings = try proposal_apply.duplicates(a, &s, key);
         defer a.free(warnings);
         if (warnings.len > 0) try out.print("警告: 同名Taskが{d}件あります。--yesによって承認を継続します。\n", .{warnings.len});
-        const count = try proposal_apply.apply(&s, key);
-        try store.save(a, io, p.state, &s);
+        const count = try service.approveProposal(&s, key);
         try out.print("{d}件のTaskを追加しました。\n", .{count});
         return;
     }
@@ -291,7 +285,7 @@ fn handleProposal(a: std.mem.Allocator, io: std.Io, env: *const std.process.Envi
             if (i.key.eql(key)) break i;
         } else return error.IssueNotFound;
         try generator.generate(a, io, env, &s, issue, repo.workspace_path, repo.exclude_patterns);
-        try store.save(a, io, p.state, &s);
+        try service.persistOrRollback(&s);
         try out.writeAll("Proposalを保存しました。確認・編集後にapproveしてください。\n");
         return;
     }

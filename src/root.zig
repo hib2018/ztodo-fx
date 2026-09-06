@@ -6,6 +6,7 @@ pub const paths = @import("core/paths.zig");
 pub const tree = @import("core/tree.zig");
 pub const proposal = @import("proposal/model.zig");
 pub const tui = @import("tui/app.zig");
+pub const application = @import("application/service.zig");
 
 test {
     _ = cli;
@@ -16,6 +17,7 @@ test {
     _ = tree;
     _ = proposal;
     _ = tui;
+    _ = application;
     _ = @import("tui/model.zig");
     _ = @import("proposal/editor.zig");
     _ = @import("proposal/apply.zig");

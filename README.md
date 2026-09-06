@@ -15,5 +15,6 @@ TUIでは`j`/`k`または矢印キーでTaskを選択し、`Space`で完了状�
 
 - [導入と初期設定](docs/getting-started.md)
 - [コマンド一覧](docs/command-reference.md)
+- [TUI操作](docs/tui.md)
 - [保存先・除外設定](docs/configuration.md)
 - [トラブルシューティング](docs/troubleshooting.md)
