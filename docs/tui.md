@@ -1,6 +1,8 @@
 # TUI操作
 
 `zt`を引数なしで実行するとTUIが起動します。`Tab`と`Shift-Tab`でIssue、Task、詳細ペインを移動し、`j`/`k`または矢印キーで項目を選択します。
+横幅90未満ではフォーカス中のペインだけを表示し、`Tab`でIssue、Task、詳細を切り替えます。
+マウスクリックでもペインと行を選択でき、ホイールでIssueまたはTaskを移動できます。Issue状態と完了Taskは色分けされます。
 
 ## Task
 
@@ -35,3 +37,7 @@ Issueペインの`r`で選択RepositoryのIssueを更新します。`p`で選択
 既存Taskと同一タイトルの候補がある場合、承認時に追加確認が入ります。既存Draftがある状態で`g`を押しても上書きせず、先に既存Draftを確認または破棄する必要があります。
 
 Proposal生成とIssue更新は現在同期実行です。処理中は入力を受け付けませんが、失敗時は既存Stateを維持してTUIへ戻ります。
+
+## Repository設定
+
+通常画面で`c`を押すとRepository設定画面を開きます。`a`で`owner/repo /absolute/workspace`を入力して追加し、`e`で選択RepositoryのWorkspaceを変更します。`d`は確認後に設定を削除します。設定変更もAtomic保存され、保存失敗時は直前の設定へ戻ります。

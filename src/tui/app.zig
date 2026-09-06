@@ -5,6 +5,7 @@ const store = @import("../core/store.zig");
 const tree = @import("../core/tree.zig");
 const task_mod = @import("../core/task.zig");
 const Service = @import("../application/service.zig").Service;
+const ConfigService = @import("../application/service.zig").ConfigService;
 const config_mod = @import("../integrations/github/config.zig");
 const gh = @import("../integrations/github/client.zig");
 const issue_adapter = @import("../integrations/github/issue.zig");
@@ -17,6 +18,7 @@ pub const panic_handler = vaxis.panic_handler;
 
 const Event = union(enum) {
     key_press: vaxis.Key,
+    mouse: vaxis.Mouse,
     winsize: vaxis.Winsize,
 };
 
@@ -39,6 +41,9 @@ fn runFallible(init: std.process.Init) !void {
     var state = try store.load(allocator, init.io, paths.state);
     defer state.deinit();
     const service = Service{ .allocator = allocator, .io = init.io, .state_path = paths.state };
+    var config = try config_mod.load(allocator, init.io, paths.config);
+    defer config.deinit();
+    const config_service = ConfigService{ .allocator = allocator, .io = init.io, .config_path = paths.config };
     var model: Model = .{};
 
     var tty_buffer: [4096]u8 = undefined;
@@ -50,6 +55,7 @@ fn runFallible(init: std.process.Init) !void {
     try loop.start();
     defer loop.stop();
     try vx.enterAltScreen(tty.writer());
+    try vx.setMouseMode(tty.writer(), true);
     try vx.queryTerminal(tty.writer(), .fromSeconds(1));
 
     while (true) {
@@ -60,14 +66,19 @@ fn runFallible(init: std.process.Init) !void {
         const frame_allocator = frame_arena.allocator();
         const issue_filter = selectedIssue(&state, model.selected_issue);
         const ordered_ids = try taskOrder(frame_allocator, &state, issue_filter, model.filterSlice());
-        draw(frame_allocator, &vx, &state, model, ordered_ids);
+        draw(frame_allocator, &vx, &state, &config, model, ordered_ids);
         try vx.render(tty.writer());
         const event = try loop.nextEvent();
         switch (event) {
             .winsize => |size| try vx.resize(allocator, tty.writer(), size),
+            .mouse => |mouse| handleMouse(&model, mouse, vx.window().width, vx.window().height, state.issues.items.len, ordered_ids.len),
             .key_press => |key| {
                 if (key.matches('c', .{ .ctrl = true })) break;
                 model.message_len = 0;
+                if (model.mode == .repository_add or model.mode == .repository_workspace) {
+                    handleRepositoryInput(&model, key, &config, config_service) catch |err| setError(&model, err);
+                    continue;
+                }
                 if (model.mode == .add or model.mode == .edit or model.mode == .search or model.mode == .proposal_add or model.mode == .proposal_edit or model.mode == .proposal_reparent) {
                     handleInput(&model, key, &state, ordered_ids, service) catch |err| setError(&model, err);
                     continue;
@@ -96,6 +107,14 @@ fn runFallible(init: std.process.Init) !void {
                     if (key.matches(vaxis.Key.escape, .{}) or key.matches('?', .{}) or key.matches('q', .{})) model.mode = .normal;
                     continue;
                 }
+                if (model.mode == .confirm_repository_delete) {
+                    handleRepositoryDelete(&model, key, &config, config_service) catch |err| setError(&model, err);
+                    continue;
+                }
+                if (model.mode == .repositories) {
+                    handleRepositories(&model, key, &config);
+                    continue;
+                }
                 if (model.mode == .confirm_proposal_delete or model.mode == .confirm_proposal_approve or model.mode == .confirm_proposal_duplicates or model.mode == .confirm_proposal_discard) {
                     handleProposalConfirmation(service, &model, &state, key) catch |err| setError(&model, err);
                     continue;
@@ -109,7 +128,7 @@ fn runFallible(init: std.process.Init) !void {
                     refreshSelectedIssue(allocator, init.io, init.environ_map, service, &model, &state) catch |err| setError(&model, err);
                     continue;
                 }
-                if (key.matches(vaxis.Key.tab, .{ .shift = true })) model.previousFocus() else if (key.matches(vaxis.Key.tab, .{})) model.nextFocus() else if (key.matches('/', .{})) model.beginInput(.search, model.filterSlice()) else if (key.matches('?', .{})) model.mode = .help else if (key.matches('p', .{})) model.mode = .proposal else switch (model.focus) {
+                if (key.matches(vaxis.Key.tab, .{ .shift = true })) model.previousFocus() else if (key.matches(vaxis.Key.tab, .{})) model.nextFocus() else if (key.matches('/', .{})) model.beginInput(.search, model.filterSlice()) else if (key.matches('c', .{})) model.mode = .repositories else if (key.matches('?', .{})) model.mode = .help else if (key.matches('p', .{})) model.mode = .proposal else switch (model.focus) {
                     .issues => handleIssueNavigation(&model, key, state.issues.items.len),
                     .tasks => handleTaskKey(&model, key, &state, ordered_ids, issue_filter, service) catch |err| setError(&model, err),
                     .details => {},
@@ -119,18 +138,19 @@ fn runFallible(init: std.process.Init) !void {
     }
 }
 
-fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import("../core/state.zig").StateRoot, model: Model, ordered_ids: []const u64) void {
+fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import("../core/state.zig").StateRoot, config: *const config_mod.Config, model: Model, ordered_ids: []const u64) void {
     const screen = vx.window();
     screen.clear();
     screen.hideCursor();
-    if (screen.width < 60 or screen.height < 12) {
-        _ = screen.printSegment(.{ .text = "zt: 端末サイズが小さすぎます（60x12以上が必要です）" }, .{});
+    if (screen.width < 40 or screen.height < 10) {
+        _ = screen.printSegment(.{ .text = "zt: 端末サイズが小さすぎます（40x10以上が必要です）" }, .{});
         return;
     }
     const body_height = screen.height -| 2;
-    const left_width = @max(@as(u16, 20), screen.width / 4);
-    const detail_width = @max(@as(u16, 24), screen.width / 4);
-    const center_width = screen.width -| left_width -| detail_width;
+    const compact = screen.width < 90;
+    const left_width: u16 = if (compact) (if (model.focus == .issues) screen.width else 0) else @max(@as(u16, 20), screen.width / 4);
+    const detail_width: u16 = if (compact) (if (model.focus == .details) screen.width else 0) else @max(@as(u16, 24), screen.width / 4);
+    const center_width: u16 = if (compact) (if (model.focus == .tasks) screen.width else 0) else screen.width -| left_width -| detail_width;
     const left = screen.child(.{ .width = left_width, .height = body_height, .border = .{ .where = .all } });
     const center = screen.child(.{ .x_off = @intCast(left_width), .width = center_width, .height = body_height, .border = .{ .where = .all } });
     const detail = screen.child(.{ .x_off = @intCast(left_width + center_width), .width = detail_width, .height = body_height, .border = .{ .where = .all } });
@@ -143,7 +163,13 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
     for (state.issues.items[issue_offset..], issue_offset..) |issue, index| {
         if (row >= left.height) break;
         const line = std.fmt.allocPrint(allocator, "{s}#{d} [{s}] {s}", .{ issue.key.repository, issue.key.issue_number, @tagName(issue.status), issue.title }) catch continue;
-        _ = left.printSegment(.{ .text = line, .style = if (model.focus == .issues and index == model.selected_issue) .{ .reverse = true } else .{} }, .{ .row_offset = row, .wrap = .none });
+        const issue_style = vaxis.Style{ .fg = .{ .index = switch (issue.status) {
+            .open => 2,
+            .closed => 8,
+            .deleted => 1,
+            .unavailable => 3,
+        } }, .reverse = model.focus == .issues and index == model.selected_issue };
+        _ = left.printSegment(.{ .text = line, .style = issue_style }, .{ .row_offset = row, .wrap = .none });
         row += 1;
     }
     if (row < left.height) _ = left.printSegment(.{ .text = "Unlinked", .style = if (model.focus == .issues and model.selected_issue == state.issues.items.len) .{ .reverse = true } else .{} }, .{ .row_offset = row, .wrap = .none });
@@ -159,7 +185,7 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
         const indent = allocator.alloc(u8, depth * 2) catch continue;
         @memset(indent, ' ');
         const line = std.fmt.allocPrint(allocator, "{s}{s} {d}: {s}", .{ indent, if (item.status == .done) "[x]" else "[ ]", item.id, item.title }) catch continue;
-        _ = center.printSegment(.{ .text = line, .style = if (model.focus == .tasks and index == model.selected) .{ .reverse = true } else .{} }, .{ .row_offset = row, .wrap = .none });
+        _ = center.printSegment(.{ .text = line, .style = .{ .fg = if (item.status == .done) .{ .index = 8 } else .default, .reverse = model.focus == .tasks and index == model.selected } }, .{ .row_offset = row, .wrap = .none });
         row += 1;
     }
     if (state.tasks.items.len == 0) _ = center.printSegment(.{ .text = "Taskはありません" }, .{ .row_offset = 2 });
@@ -174,10 +200,14 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
         _ = detail.printSegment(.{ .text = text }, .{ .row_offset = 2, .wrap = .word });
     };
     const footer_text = if (model.message_len != 0) model.messageSlice() else switch (model.mode) {
-        .normal => "NORMAL  Tab:ペイン  j/k:移動  a:追加 e:編集 d:削除 p:Proposal ?:help q:終了",
+        .normal => "NORMAL  Tab:ペイン j/k:移動 a/e/d:Task p:Proposal c:Repositories ?:help q:終了",
         .add => "ADD  タイトルを入力 Enter:保存 Esc:取消",
         .edit => "EDIT  タイトルを入力 Enter:保存 Esc:取消",
         .search => "SEARCH  絞込み文字列を入力 Enter:適用 Esc:取消",
+        .repositories => "REPOSITORIES  j/k:選択 a:追加 e:Workspace変更 d:削除 Esc:戻る",
+        .repository_add => "REPOSITORY ADD  owner/repo /absolute/workspace Enter:保存 Esc:取消",
+        .repository_workspace => "WORKSPACE  絶対pathを入力 Enter:保存 Esc:取消",
+        .confirm_repository_delete => "DELETE REPOSITORY  y:削除 Esc:取消",
         .confirm_delete => "DELETE  s:部分木削除 p:子を昇格 Esc:取消",
         .help => "HELP",
         .proposal => "PROPOSAL  j/k:選択 a/e/d:編集 J/K:移動 R:親変更 g:生成 A:承認 D:破棄",
@@ -193,6 +223,9 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
 
     if (model.mode == .add or model.mode == .edit) drawDialog(screen, "Task title", model.inputSlice());
     if (model.mode == .search) drawDialog(screen, "Search tasks", model.inputSlice());
+    if (model.mode == .repository_add) drawDialog(screen, "Add repository", model.inputSlice());
+    if (model.mode == .repository_workspace) drawDialog(screen, "Workspace path", model.inputSlice());
+    if (model.mode == .confirm_repository_delete) drawDialog(screen, "Repository設定を削除します", "y: confirm / Esc: cancel");
     if (model.mode == .proposal_edit) drawDialog(screen, "Candidate title", model.inputSlice());
     if (model.mode == .proposal_add) drawDialog(screen, "New candidate title", model.inputSlice());
     if (model.mode == .proposal_reparent) drawDialog(screen, "Parent candidate ID", model.inputSlice());
@@ -203,6 +236,7 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
     if (model.mode == .confirm_proposal_discard) drawDialog(screen, "Proposalを破棄します", "y: confirm / Esc: cancel");
     if (model.mode == .help) drawDialog(screen, "Help", "Tab: focus  j/k: select  Space: toggle  a/e/d: task  p: proposal  q: quit");
     if (model.mode == .proposal) drawProposal(allocator, screen, state, model);
+    if (model.mode == .repositories) drawRepositories(allocator, screen, config, model);
 }
 
 fn drawDialog(screen: vaxis.Window, title: []const u8, body: []const u8) void {
@@ -237,9 +271,108 @@ fn drawProposal(allocator: std.mem.Allocator, screen: vaxis.Window, state: *cons
     }
 }
 
+fn drawRepositories(allocator: std.mem.Allocator, screen: vaxis.Window, config: *const config_mod.Config, model: Model) void {
+    const dialog = screen.child(.{ .x_off = 2, .y_off = 1, .width = screen.width -| 4, .height = screen.height -| 3, .border = .{ .where = .all } });
+    dialog.fill(.{ .default = true });
+    _ = dialog.printSegment(.{ .text = "Repositories", .style = .{ .bold = true } }, .{ .col_offset = 1 });
+    var row: u16 = 2;
+    for (config.repositories.items, 0..) |repository, index| {
+        if (row >= dialog.height) break;
+        const line = std.fmt.allocPrint(allocator, "{s}  {s}", .{ repository.repository, repository.workspace_path }) catch continue;
+        _ = dialog.printSegment(.{ .text = line, .style = if (index == model.selected_repository) .{ .reverse = true } else .{} }, .{ .row_offset = row, .col_offset = 1, .wrap = .none });
+        row += 1;
+    }
+    if (config.repositories.items.len == 0) _ = dialog.printSegment(.{ .text = "Repositoryは未登録です。aで追加します。" }, .{ .row_offset = 2, .col_offset = 1 });
+}
+
+fn handleRepositories(model: *Model, key: vaxis.Key, config: *const config_mod.Config) void {
+    if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{})) {
+        model.mode = .normal;
+    } else if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+        if (model.selected_repository + 1 < config.repositories.items.len) model.selected_repository += 1;
+    } else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+        model.selected_repository -|= 1;
+    } else if (key.matches('a', .{})) {
+        model.beginInput(.repository_add, "");
+    } else if (key.matches('e', .{}) and model.selected_repository < config.repositories.items.len) {
+        model.beginInput(.repository_workspace, config.repositories.items[model.selected_repository].workspace_path);
+    } else if (key.matches('d', .{}) and model.selected_repository < config.repositories.items.len) {
+        model.mode = .confirm_repository_delete;
+    }
+}
+
+fn handleRepositoryInput(model: *Model, key: vaxis.Key, config: *config_mod.Config, service: ConfigService) !void {
+    if (key.matches(vaxis.Key.escape, .{})) {
+        model.mode = .repositories;
+        return;
+    }
+    if (key.matches(vaxis.Key.backspace, .{})) return model.backspace();
+    if (key.matches(vaxis.Key.enter, .{})) {
+        const input = std.mem.trim(u8, model.inputSlice(), " \t\r\n");
+        if (model.mode == .repository_add) {
+            const split = std.mem.indexOfScalar(u8, input, ' ') orelse return error.Usage;
+            const repository = input[0..split];
+            const workspace = std.mem.trim(u8, input[split + 1 ..], " \t");
+            try service.add(config, repository, workspace);
+            model.selected_repository = config.repositories.items.len - 1;
+        } else if (model.mode == .repository_workspace) {
+            if (model.selected_repository >= config.repositories.items.len) return error.RepositoryNotFound;
+            const repository = config.repositories.items[model.selected_repository].repository;
+            try service.setWorkspace(config, repository, input);
+        }
+        model.input_len = 0;
+        model.mode = .repositories;
+        return;
+    }
+    if (key.text) |text| model.appendInput(text);
+}
+
+fn handleRepositoryDelete(model: *Model, key: vaxis.Key, config: *config_mod.Config, service: ConfigService) !void {
+    if (key.matches(vaxis.Key.escape, .{})) {
+        model.mode = .repositories;
+        return;
+    }
+    if (!key.matches('y', .{})) return;
+    if (model.selected_repository >= config.repositories.items.len) return error.RepositoryNotFound;
+    const repository = config.repositories.items[model.selected_repository].repository;
+    try service.delete(config, repository);
+    model.selected_repository -|= 1;
+    model.mode = .repositories;
+}
+
 fn selectedIssue(state: *const @import("../core/state.zig").StateRoot, index: usize) ?task_mod.IssueKey {
     if (index >= state.issues.items.len) return null;
     return state.issues.items[index].key;
+}
+
+fn handleMouse(model: *Model, mouse: vaxis.Mouse, width: u16, height: u16, issue_count: usize, task_count: usize) void {
+    if (mouse.button == .wheel_down) {
+        if (model.focus == .issues) {
+            if (model.selected_issue < issue_count) model.selected_issue += 1;
+        } else if (model.focus == .tasks) model.moveDown(task_count);
+        return;
+    }
+    if (mouse.button == .wheel_up) {
+        if (model.focus == .issues) model.selected_issue -|= 1 else if (model.focus == .tasks) model.moveUp();
+        return;
+    }
+    if (mouse.button != .left or mouse.type != .press or mouse.row < 3) return;
+    const row: usize = @intCast(mouse.row - 3);
+    const compact = width < 90;
+    if (!compact) {
+        const left_width = @max(@as(u16, 20), width / 4);
+        const detail_width = @max(@as(u16, 24), width / 4);
+        if (mouse.col < left_width) model.focus = .issues else if (mouse.col < width - detail_width) model.focus = .tasks else model.focus = .details;
+    }
+    const visible: usize = @max(@as(usize, 1), height -| 7);
+    if (model.focus == .issues) {
+        const offset = if (model.selected_issue >= visible) model.selected_issue - visible + 1 else 0;
+        model.selected_issue = @min(offset + row, issue_count);
+        model.selected = 0;
+    } else if (model.focus == .tasks and task_count != 0) {
+        const offset = if (model.selected >= visible) model.selected - visible + 1 else 0;
+        model.selected = @min(offset + row, task_count - 1);
+    }
 }
 
 fn handleIssueNavigation(model: *Model, key: vaxis.Key, issue_count: usize) void {
@@ -501,4 +634,14 @@ test "task order follows the selected issue and search filter" {
     const filtered = try taskOrder(a, &state, .{ .repository = "a/b", .issue_number = 1 }, "日本語");
     defer a.free(filtered);
     try std.testing.expectEqualSlices(u64, &.{2}, filtered);
+}
+
+test "mouse selects panes rows and scrolls" {
+    var model: Model = .{};
+    handleMouse(&model, .{ .col = 1, .row = 4, .button = .left, .type = .press, .mods = .{} }, 120, 30, 4, 10);
+    try std.testing.expectEqual(Model.Focus.issues, model.focus);
+    try std.testing.expectEqual(@as(usize, 1), model.selected_issue);
+    model.focus = .tasks;
+    handleMouse(&model, .{ .col = 40, .row = 4, .button = .wheel_down, .type = .press, .mods = .{} }, 120, 30, 4, 10);
+    try std.testing.expectEqual(@as(usize, 1), model.selected);
 }

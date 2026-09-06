@@ -3,6 +3,7 @@ const state_mod = @import("../core/state.zig");
 const store = @import("../core/store.zig");
 const task = @import("../core/task.zig");
 const proposal_apply = @import("../proposal/apply.zig");
+const config_mod = @import("../integrations/github/config.zig");
 
 pub const Service = struct {
     allocator: std.mem.Allocator,
@@ -67,6 +68,38 @@ pub const Service = struct {
     }
 };
 
+pub const ConfigService = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config_path: []const u8,
+
+    fn persistOrRollback(self: ConfigService, config: *config_mod.Config) !void {
+        config_mod.save(self.allocator, self.io, self.config_path, config) catch |err| {
+            const restored = config_mod.load(self.allocator, self.io, self.config_path) catch return err;
+            config.deinit();
+            config.* = restored;
+            return err;
+        };
+    }
+
+    pub fn add(self: ConfigService, config: *config_mod.Config, repository: []const u8, workspace: []const u8) !void {
+        try config_mod.validateWorkspace(self.io, workspace);
+        try config.add(repository, workspace);
+        try self.persistOrRollback(config);
+    }
+
+    pub fn setWorkspace(self: ConfigService, config: *config_mod.Config, repository: []const u8, workspace: []const u8) !void {
+        try config_mod.validateWorkspace(self.io, workspace);
+        try config.setWorkspace(repository, workspace);
+        try self.persistOrRollback(config);
+    }
+
+    pub fn delete(self: ConfigService, config: *config_mod.Config, repository: []const u8) !void {
+        try config.delete(repository);
+        try self.persistOrRollback(config);
+    }
+};
+
 test "service persists mutations through the shared core" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -88,4 +121,21 @@ test "service persists mutations through the shared core" {
     try std.testing.expectError(error.InvalidState, service.persistOrRollback(&state));
     try std.testing.expectEqual(@as(usize, 1), state.tasks.items.len);
     try std.testing.expectEqual(task.Status.done, state.tasks.items[0].status);
+}
+
+test "config service persists repository changes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const a = std.testing.allocator;
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(base);
+    const path = try std.fs.path.join(a, &.{ base, "config.json" });
+    defer a.free(path);
+    var config = config_mod.Config.init(a);
+    defer config.deinit();
+    const service = ConfigService{ .allocator = a, .io = std.testing.io, .config_path = path };
+    try service.add(&config, "a/b", base);
+    var loaded = try config_mod.load(a, std.testing.io, path);
+    defer loaded.deinit();
+    try std.testing.expectEqualStrings(base, loaded.find("a/b").?.workspace_path);
 }
