@@ -16,6 +16,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io, request: Request) !Result {
     const result = std.process.run(a, io, .{ .argv = request.argv, .cwd = if (request.cwd) |p| .{ .path = p } else .inherit, .environ_map = request.env_map, .stdout_limit = .limited(request.output_limit), .stderr_limit = .limited(request.output_limit) }) catch |e| return switch (e) {
         error.FileNotFound => error.ExecutableNotFound,
         error.StreamTooLong => error.OutputTooLarge,
+        error.Canceled => error.Canceled,
         else => error.ProcessFailed,
     };
     return .{ .term = result.term, .stdout = result.stdout, .stderr = result.stderr };
@@ -26,7 +27,10 @@ fn runWithInput(a: std.mem.Allocator, io: std.Io, request: Request) !Result {
         else => error.ProcessFailed,
     };
     defer child.kill(io);
-    std.Io.File.writeStreamingAll(child.stdin.?, io, request.stdin) catch return error.ProcessFailed;
+    std.Io.File.writeStreamingAll(child.stdin.?, io, request.stdin) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => error.ProcessFailed,
+    };
     child.stdin.?.close(io);
     child.stdin = null;
     var buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
@@ -40,10 +44,17 @@ fn runWithInput(a: std.mem.Allocator, io: std.Io, request: Request) !Result {
     } else |e| switch (e) {
         error.EndOfStream => {},
         error.Timeout => return error.Timeout,
+        error.Canceled => return error.Canceled,
         else => return error.ProcessFailed,
     }
-    reader.checkAnyError() catch return error.ProcessFailed;
-    const term = child.wait(io) catch return error.ProcessFailed;
+    reader.checkAnyError() catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => error.ProcessFailed,
+    };
+    const term = child.wait(io) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => error.ProcessFailed,
+    };
     const out_bytes = try reader.toOwnedSlice(0);
     errdefer a.free(out_bytes);
     const err_bytes = try reader.toOwnedSlice(1);
@@ -75,4 +86,8 @@ test "runner classifies output limit timeout and signal" {
     const signaled = try run(std.testing.allocator, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", "kill -TERM $$" } });
     defer signaled.deinit(std.testing.allocator);
     try std.testing.expect(!successful(signaled.term));
+}
+test "runner propagates concurrent cancellation and terminates child" {
+    var future = try std.testing.io.concurrent(run, .{ std.testing.allocator, std.testing.io, Request{ .argv = &.{ "/bin/sh", "-c", "sleep 10" }, .stdin = "start" } });
+    try std.testing.expectError(error.Canceled, future.cancel(std.testing.io));
 }
