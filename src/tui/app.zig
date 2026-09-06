@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const paths_mod = @import("../core/paths.zig");
 const store = @import("../core/store.zig");
+const state_mod = @import("../core/state.zig");
 const tree = @import("../core/tree.zig");
 const task_mod = @import("../core/task.zig");
 const Service = @import("../application/service.zig").Service;
@@ -19,8 +20,22 @@ pub const panic_handler = vaxis.panic_handler;
 const Event = union(enum) {
     key_press: vaxis.Key,
     mouse: vaxis.Mouse,
+    operation_complete,
     winsize: vaxis.Winsize,
 };
+const Loop = vaxis.Loop(Event);
+const Proposal = @import("../proposal/model.zig").Proposal;
+const OperationBox = struct {
+    loop: *Loop,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    issue: task_mod.IssueSnapshot,
+    workspace: []const u8,
+    excludes: []const []const u8,
+    result: ?(anyerror!Proposal) = null,
+};
+const Operation = struct { box: *OperationBox, future: std.Io.Future(void), cancel_requested: bool = false };
 
 pub fn run(init: std.process.Init) u8 {
     runFallible(init) catch |err| {
@@ -51,12 +66,18 @@ fn runFallible(init: std.process.Init) !void {
     defer tty.deinit();
     var vx = try vaxis.init(init.io, allocator, init.environ_map, .{});
     defer vx.deinit(allocator, tty.writer());
-    var loop: vaxis.Loop(Event) = .init(init.io, &tty, &vx);
+    var loop: Loop = .init(init.io, &tty, &vx);
     try loop.start();
     defer loop.stop();
     try vx.enterAltScreen(tty.writer());
     try vx.setMouseMode(tty.writer(), true);
     try vx.queryTerminal(tty.writer(), .fromSeconds(1));
+    var operation: ?Operation = null;
+    defer if (operation) |*active| {
+        _ = active.future.cancel(init.io);
+        if (active.box.result) |result| if (result) |proposal| state_mod.freeProposal(allocator, proposal) else |_| {};
+        allocator.destroy(active.box);
+    };
 
     while (true) {
         // Vaxis cells retain slices into formatted text until render completes.
@@ -70,11 +91,20 @@ fn runFallible(init: std.process.Init) !void {
         try vx.render(tty.writer());
         const event = try loop.nextEvent();
         switch (event) {
+            .operation_complete => finishProposalOperation(allocator, init.io, service, &model, &state, &operation),
             .winsize => |size| try vx.resize(allocator, tty.writer(), size),
             .mouse => |mouse| handleMouse(&model, mouse, vx.window().width, vx.window().height, state.issues.items.len, ordered_ids.len),
             .key_press => |key| {
                 if (key.matches('c', .{ .ctrl = true })) break;
                 model.message_len = 0;
+                if (model.mode == .proposal_running) {
+                    if (key.matches(vaxis.Key.escape, .{})) if (operation) |*active| {
+                        _ = active.future.cancel(init.io);
+                        active.cancel_requested = true;
+                        model.setMessage("Proposal生成を中断しています…");
+                    };
+                    continue;
+                }
                 if (model.mode == .repository_add or model.mode == .repository_workspace) {
                     handleRepositoryInput(&model, key, &config, config_service) catch |err| setError(&model, err);
                     continue;
@@ -120,7 +150,7 @@ fn runFallible(init: std.process.Init) !void {
                     continue;
                 }
                 if (model.mode == .proposal) {
-                    handleProposal(allocator, init.io, init.environ_map, paths.config, service, &model, &state, key) catch |err| setError(&model, err);
+                    handleProposal(allocator, init.io, init.environ_map, &config, service, &model, &state, key, &loop, &operation) catch |err| setError(&model, err);
                     continue;
                 }
                 if (key.matches('q', .{})) break;
@@ -211,6 +241,7 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
         .confirm_delete => "DELETE  s:部分木削除 p:子を昇格 Esc:取消",
         .help => "HELP",
         .proposal => "PROPOSAL  j/k:選択 a/e/d:編集 J/K:移動 R:親変更 g:生成 A:承認 D:破棄",
+        .proposal_running => "GENERATING  fxがWorkspaceを調査しています Esc:中断",
         .proposal_add => "PROPOSAL ADD  タイトルを入力 Enter:保存 Esc:取消",
         .proposal_edit => "PROPOSAL EDIT  タイトルを入力 Enter:保存 Esc:取消",
         .proposal_reparent => "REPARENT  親candidate IDまたはrootを入力 Enter:保存 Esc:取消",
@@ -236,6 +267,7 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
     if (model.mode == .confirm_proposal_discard) drawDialog(screen, "Proposalを破棄します", "y: confirm / Esc: cancel");
     if (model.mode == .help) drawDialog(screen, "Help", "Tab: focus  j/k: select  Space: toggle  a/e/d: task  p: proposal  q: quit");
     if (model.mode == .proposal) drawProposal(allocator, screen, state, model);
+    if (model.mode == .proposal_running) drawDialog(screen, "Generating proposal…", "fx実行中です。Escで中断します");
     if (model.mode == .repositories) drawRepositories(allocator, screen, config, model);
 }
 
@@ -456,7 +488,7 @@ fn handleInput(model: *Model, key: vaxis.Key, state: *@import("../core/state.zig
     if (key.text) |text| model.appendInput(text);
 }
 
-fn handleProposal(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, config_path: []const u8, service: Service, model: *Model, state: *@import("../core/state.zig").StateRoot, key: vaxis.Key) !void {
+fn handleProposal(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, config: *config_mod.Config, service: Service, model: *Model, state: *@import("../core/state.zig").StateRoot, key: vaxis.Key, loop: *Loop, operation: *?Operation) !void {
     if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{})) {
         model.mode = .normal;
         return;
@@ -502,13 +534,12 @@ fn handleProposal(allocator: std.mem.Allocator, io: std.Io, env: *const std.proc
     } else if (key.matches('g', .{})) {
         if (proposal != null) return error.ProposalAlreadyExists;
         const issue = &state.issues.items[model.selected_issue];
-        var config = try config_mod.load(allocator, io, config_path);
-        defer config.deinit();
         const repository = config.find(issue.key.repository) orelse return error.RepositoryNotFound;
-        try generator.generate(allocator, io, env, state, issue.*, repository.workspace_path, repository.exclude_patterns);
-        try service.persistOrRollback(state);
-        model.selected_candidate = 0;
-        model.setMessage("Proposalを生成しました");
+        const box = try allocator.create(OperationBox);
+        errdefer allocator.destroy(box);
+        box.* = .{ .loop = loop, .allocator = allocator, .io = io, .env = env, .issue = issue.*, .workspace = repository.workspace_path, .excludes = repository.exclude_patterns };
+        operation.* = .{ .box = box, .future = try io.concurrent(proposalWorker, .{box}) };
+        model.mode = .proposal_running;
     } else if (key.matches('r', .{})) {
         var remote = try gh.list(allocator, io, env, issue_key.repository);
         defer remote.deinit();
@@ -516,6 +547,47 @@ fn handleProposal(allocator: std.mem.Allocator, io: std.Io, env: *const std.proc
         try service.persistOrRollback(state);
         model.setMessage("Issueを更新しました");
     }
+}
+
+fn proposalWorker(box: *OperationBox) void {
+    box.result = generator.buildDraft(box.allocator, box.io, box.env, box.issue, box.workspace, box.excludes);
+    box.loop.postEvent(.operation_complete) catch {};
+}
+
+fn finishProposalOperation(allocator: std.mem.Allocator, io: std.Io, service: Service, model: *Model, state: *state_mod.StateRoot, operation: *?Operation) void {
+    var active = operation.* orelse return;
+    _ = active.future.await(io);
+    defer allocator.destroy(active.box);
+    defer operation.* = null;
+    const result = active.box.result orelse {
+        setError(model, error.ProcessFailed);
+        model.mode = .proposal;
+        return;
+    };
+    const draft = result catch |err| {
+        if (active.cancel_requested or err == error.Canceled) model.setMessage("Proposal生成を中断しました") else setError(model, err);
+        model.mode = .proposal;
+        return;
+    };
+    defer state_mod.freeProposal(allocator, draft);
+    if (active.cancel_requested) {
+        model.setMessage("Proposal生成を中断しました");
+        model.mode = .proposal;
+        return;
+    }
+    state.putProposal(draft) catch |err| {
+        setError(model, err);
+        model.mode = .proposal;
+        return;
+    };
+    service.persistOrRollback(state) catch |err| {
+        setError(model, err);
+        model.mode = .proposal;
+        return;
+    };
+    model.selected_candidate = 0;
+    model.setMessage("Proposalを生成しました");
+    model.mode = .proposal;
 }
 
 fn refreshSelectedIssue(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, service: Service, model: *Model, state: *@import("../core/state.zig").StateRoot) !void {

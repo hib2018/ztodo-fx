@@ -15,6 +15,7 @@ pub const Model = struct {
         confirm_delete,
         help,
         proposal,
+        proposal_running,
         proposal_add,
         proposal_edit,
         proposal_reparent,

@@ -6,6 +6,12 @@ const fx_permissions = @import("../integrations/fx/permissions.zig");
 const fx_client = @import("../integrations/fx/client.zig");
 const response = @import("../integrations/fx/response.zig");
 pub fn generate(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, s: *state.StateRoot, issue: task.IssueSnapshot, workspace: []const u8, excludes: []const []const u8) !void {
+    const draft = try buildDraft(a, io, env, issue, workspace, excludes);
+    defer state.freeProposal(a, draft);
+    try s.putProposal(draft);
+}
+
+pub fn buildDraft(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, issue: task.IssueSnapshot, workspace: []const u8, excludes: []const []const u8) !@import("model.zig").Proposal {
     const base = env.get("TMPDIR") orelse "/tmp";
     const snap = try @import("../platform/snapshot.zig").create(a, io, base, workspace, excludes);
     defer snap.deinit(a, io);
@@ -18,7 +24,7 @@ pub fn generate(a: std.mem.Allocator, io: std.Io, env: *const std.process.Enviro
     defer parsed.deinit();
     if (!parsed.value.issue_key.eql(issue.key)) return error.IssueMismatch;
     try @import("model.zig").validate(parsed.value);
-    try s.putProposal(parsed.value);
+    return state.cloneProposal(a, parsed.value);
 }
 test "generator module is explicitly invoked only" {
     try std.testing.expect(true);
