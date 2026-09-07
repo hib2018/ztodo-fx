@@ -183,6 +183,10 @@ pub const StateRoot = struct {
     }
     pub fn validate(self: *const StateRoot) !void {
         if (self.schema_version != 1 or self.next_task_id == 0) return error.InvalidState;
+        for (self.issues.items, 0..) |issue, index| {
+            if (!std.unicode.utf8ValidateSlice(issue.title) or !std.unicode.utf8ValidateSlice(issue.body)) return error.InvalidUtf8;
+            for (self.issues.items[0..index]) |prior| if (prior.key.eql(issue.key)) return error.DuplicateIssue;
+        }
         var max: u64 = 0;
         for (self.tasks.items, 0..) |t, i| {
             if (t.id == 0) return error.InvalidTaskId;

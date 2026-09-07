@@ -1,11 +1,12 @@
 const std = @import("std");
 
-pub const Paths = struct { state: []u8, config: []u8 };
+pub const Paths = struct { state: []u8, config: []u8, view: []u8 };
 
 pub fn resolve(allocator: std.mem.Allocator, env: std.process.Environ.Map) !Paths {
     if (env.get("ZTODO_FX_DATA_FILE")) |state_override| {
         const config = env.get("ZTODO_FX_CONFIG_FILE") orelse return error.MissingConfigOverride;
-        return .{ .state = try allocator.dupe(u8, state_override), .config = try allocator.dupe(u8, config) };
+        const parent = std.fs.path.dirname(state_override) orelse ".";
+        return .{ .state = try allocator.dupe(u8, state_override), .config = try allocator.dupe(u8, config), .view = try std.fs.path.join(allocator, &.{ parent, "view.json" }) };
     }
     const home = env.get("HOME") orelse return error.HomeNotSet;
     const data_root = env.get("XDG_DATA_HOME") orelse try std.fs.path.join(allocator, &.{ home, ".local", "share" });
@@ -15,17 +16,20 @@ pub fn resolve(allocator: std.mem.Allocator, env: std.process.Environ.Map) !Path
     return .{
         .state = try std.fs.path.join(allocator, &.{ data_root, "ztodo-fx", "state.json" }),
         .config = try std.fs.path.join(allocator, &.{ config_root, "ztodo-fx", "config.json" }),
+        .view = try std.fs.path.join(allocator, &.{ data_root, "ztodo-fx", "view.json" }),
     };
 }
 
 pub fn deinit(allocator: std.mem.Allocator, value: Paths) void {
     allocator.free(value.state);
     allocator.free(value.config);
+    allocator.free(value.view);
 }
 
 pub fn ensureParents(io: std.Io, value: Paths) !void {
     if (std.fs.path.dirname(value.state)) |p| try std.Io.Dir.cwd().createDirPath(io, p);
     if (std.fs.path.dirname(value.config)) |p| try std.Io.Dir.cwd().createDirPath(io, p);
+    if (std.fs.path.dirname(value.view)) |p| try std.Io.Dir.cwd().createDirPath(io, p);
 }
 
 test "paths use only ztodo-fx namespace" {

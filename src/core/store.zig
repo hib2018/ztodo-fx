@@ -19,7 +19,21 @@ pub fn decode(a: std.mem.Allocator, bytes: []const u8) !state_mod.StateRoot {
     s.next_task_id = parsed.value.next_task_id;
     for (parsed.value.tasks) |t| try s.tasks.append(a, .{ .id = t.id, .title = try a.dupe(u8, t.title), .status = t.status, .issue_key = try state_mod.dupeOptionalKey(a, t.issue_key), .parent_id = t.parent_id, .position = t.position });
     // Issue/proposal decoding is intentionally owned below to keep allocations explicit.
-    for (parsed.value.issues) |i| try s.issues.append(a, .{ .key = .{ .repository = try a.dupe(u8, i.key.repository), .issue_number = i.key.issue_number }, .title = try a.dupe(u8, i.title), .body = try a.dupe(u8, i.body), .status = i.status, .last_fetched_at = i.last_fetched_at, .last_error = i.last_error });
+    for (parsed.value.issues) |i| {
+        var duplicate = false;
+        for (s.issues.items) |existing| if (existing.key.eql(i.key)) {
+            duplicate = true;
+            break;
+        };
+        if (duplicate) continue;
+        try s.issues.append(a, .{ .key = .{ .repository = try a.dupe(u8, i.key.repository), .issue_number = i.key.issue_number }, .title = try a.dupe(u8, i.title), .body = try a.dupe(u8, i.body), .status = i.status, .last_fetched_at = i.last_fetched_at, .last_error = i.last_error });
+    }
+    std.mem.sort(task_mod.IssueSnapshot, s.issues.items, {}, struct {
+        fn lessThan(_: void, left: task_mod.IssueSnapshot, right: task_mod.IssueSnapshot) bool {
+            const order = std.mem.order(u8, left.key.repository, right.key.repository);
+            return order == .lt or (order == .eq and left.key.issue_number < right.key.issue_number);
+        }
+    }.lessThan);
     for (parsed.value.proposals) |p| try s.putProposal(p);
     try s.validate();
     return s;
@@ -59,6 +73,14 @@ test "schema and size limits reject without adopting data" {
     defer std.testing.allocator.free(huge);
     @memset(huge, ' ');
     try std.testing.expectError(error.FileTooLarge, decode(std.testing.allocator, huge));
+}
+test "decode removes duplicate issues and sorts stable keys" {
+    const bytes = "{\"schema_version\":1,\"next_task_id\":1,\"tasks\":[],\"issues\":[{\"key\":{\"repository\":\"z/r\",\"issue_number\":2},\"title\":\"two\"},{\"key\":{\"repository\":\"a/r\",\"issue_number\":1},\"title\":\"one\"},{\"key\":{\"repository\":\"z/r\",\"issue_number\":2},\"title\":\"duplicate\"}]}";
+    var restored = try decode(std.testing.allocator, bytes);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 2), restored.issues.items.len);
+    try std.testing.expectEqualStrings("a/r", restored.issues.items[0].key.repository);
+    try std.testing.expectEqual(@as(u64, 2), restored.issues.items[1].key.issue_number);
 }
 test "failed validation leaves existing atomic file intact" {
     var tmp = std.testing.tmpDir(.{});

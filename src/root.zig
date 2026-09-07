@@ -19,6 +19,8 @@ test {
     _ = tui;
     _ = application;
     _ = @import("tui/model.zig");
+    _ = @import("tui/view_store.zig");
+    _ = @import("tui/layout.zig");
     _ = @import("proposal/editor.zig");
     _ = @import("proposal/apply.zig");
     _ = @import("proposal/generator.zig");

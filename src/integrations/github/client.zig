@@ -24,6 +24,24 @@ pub fn open(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Ma
     defer result.deinit(a);
     if (!process.successful(result.term)) return error.GitHubFailed;
 }
+
+fn mutate(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, argv: []const []const u8) !void {
+    const result = try process.run(a, io, .{ .argv = argv, .env_map = env });
+    defer result.deinit(a);
+    if (!process.successful(result.term)) return classifyFailure(result.stderr);
+}
+
+pub fn edit(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, repository: []const u8, number: []const u8, title: []const u8, body: []const u8) !void {
+    return mutate(io, a, env, &.{ env.get("ZTODO_FX_GH_BIN") orelse "gh", "issue", "edit", number, "--repo", repository, "--title", title, "--body", body });
+}
+
+pub fn create(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, repository: []const u8, title: []const u8, body: []const u8) !void {
+    return mutate(io, a, env, &.{ env.get("ZTODO_FX_GH_BIN") orelse "gh", "issue", "create", "--repo", repository, "--title", title, "--body", body });
+}
+
+pub fn setClosed(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, repository: []const u8, number: []const u8, closed: bool) !void {
+    return mutate(io, a, env, &.{ env.get("ZTODO_FX_GH_BIN") orelse "gh", "issue", if (closed) "close" else "reopen", number, "--repo", repository });
+}
 test "issue command pins JSON fields" {
     try std.testing.expect(std.mem.indexOf(u8, "number,title,body,state", "body") != null);
 }
@@ -65,4 +83,50 @@ test "GitHub failures distinguish permission network and not found" {
     try std.testing.expect(classifyFailure("403 forbidden") == error.Forbidden);
     try std.testing.expect(classifyFailure("network connection failed") == error.Network);
     try std.testing.expect(classifyFailure("404 not found") == error.NotFound);
+}
+
+test "issue open uses gh web mode and reports failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const a = std.testing.allocator;
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(base);
+    const script = try std.fs.path.join(a, &.{ base, "gh-open" });
+    defer a.free(script);
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, script, .{});
+        defer file.close(std.testing.io);
+        try std.Io.File.writeStreamingAll(file, std.testing.io, "#!/bin/sh\ncase \"$*\" in *'issue view 7 --repo a/b --web'*) exit 0;; *) exit 1;; esac\n");
+    }
+    const chmod = try process.run(a, std.testing.io, .{ .argv = &.{ "chmod", "+x", script } });
+    defer chmod.deinit(a);
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("ZTODO_FX_GH_BIN", script);
+    try open(std.testing.io, a, &env, "a/b", "7");
+    try std.testing.expectError(error.GitHubFailed, open(std.testing.io, a, &env, "a/b", "8"));
+}
+
+test "issue mutations use non-interactive gh arguments" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const a = std.testing.allocator;
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(base);
+    const script = try std.fs.path.join(a, &.{ base, "gh-mutate" });
+    defer a.free(script);
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, script, .{});
+        defer file.close(std.testing.io);
+        try std.Io.File.writeStreamingAll(file, std.testing.io, "#!/bin/sh\ncase \"$*\" in\n'issue edit 7 --repo a/b --title New title --body New body'|'issue create --repo a/b --title New title --body New body'|'issue close 7 --repo a/b'|'issue reopen 7 --repo a/b') exit 0;;\n*) echo bad arguments >&2; exit 1;;\nesac\n");
+    }
+    const chmod = try process.run(a, std.testing.io, .{ .argv = &.{ "chmod", "+x", script } });
+    defer chmod.deinit(a);
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("ZTODO_FX_GH_BIN", script);
+    try edit(std.testing.io, a, &env, "a/b", "7", "New title", "New body");
+    try create(std.testing.io, a, &env, "a/b", "New title", "New body");
+    try setClosed(std.testing.io, a, &env, "a/b", "7", true);
+    try setClosed(std.testing.io, a, &env, "a/b", "7", false);
 }

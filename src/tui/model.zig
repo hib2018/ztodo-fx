@@ -25,6 +25,14 @@ pub const Model = struct {
         confirm_proposal_approve,
         confirm_proposal_duplicates,
         confirm_proposal_discard,
+        issue_edit_title,
+        issue_edit_body,
+        issue_create_title,
+        issue_create_body,
+        issue_create_repository,
+        confirm_issue_edit,
+        confirm_issue_create,
+        confirm_issue_state,
     };
     pub const MenuTab = enum { proposal, repositories, issues };
 
@@ -47,6 +55,12 @@ pub const Model = struct {
     expanded_unlinked: bool = false,
     expanded_tasks: std.AutoHashMapUnmanaged(u64, void) = .empty,
     detail_scroll: usize = 0,
+    selected_task: ?u64 = null,
+    selected_issue_token: ?u64 = null,
+    selected_unlinked: bool = false,
+    selection_restored: bool = false,
+    issue_draft_title: [800]u8 = undefined,
+    issue_draft_title_len: usize = 0,
 
     pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
         self.expanded_issues.deinit(allocator);

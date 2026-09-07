@@ -14,6 +14,8 @@ const generator = @import("../proposal/generator.zig");
 const proposal_editor = @import("../proposal/editor.zig");
 const proposal_apply = @import("../proposal/apply.zig");
 const Model = @import("model.zig").Model;
+const view_store = @import("view_store.zig");
+const layout = @import("layout.zig");
 
 pub const panic_handler = vaxis.panic_handler;
 
@@ -66,6 +68,7 @@ fn runFallible(init: std.process.Init) !void {
     const config_service = ConfigService{ .allocator = allocator, .io = init.io, .config_path = paths.config };
     var model: Model = .{};
     defer model.deinit(allocator);
+    view_store.load(allocator, init.io, paths.view, &model) catch {};
 
     var tty_buffer: [4096]u8 = undefined;
     var tty = try vaxis.Tty.init(init.io, &tty_buffer);
@@ -86,12 +89,16 @@ fn runFallible(init: std.process.Init) !void {
     };
 
     while (true) {
+        // Persist after every handled event so expansion/selection changes survive
+        // abnormal termination as well as an ordinary quit.
+        defer view_store.save(allocator, init.io, paths.view, &model) catch {};
         // Vaxis cells retain slices into formatted text until render completes.
         // Keep every per-frame string alive for that entire interval.
         var frame_arena = std.heap.ArenaAllocator.init(allocator);
         defer frame_arena.deinit();
         const frame_allocator = frame_arena.allocator();
         const rows = try visibleTreeRows(frame_allocator, &state, &model, model.filterSlice());
+        if (!model.selection_restored) restoreSelection(&model, &state, rows);
         if (model.selected >= rows.len and rows.len != 0) model.selected = rows.len - 1;
         syncSelection(&model, &state, rows);
         const selected_task = selectedTreeTask(rows, model.selected);
@@ -115,6 +122,20 @@ fn runFallible(init: std.process.Init) !void {
                 }
                 if (model.mode == .repository_add or model.mode == .repository_workspace) {
                     handleRepositoryInput(&model, key, &config, config_service) catch |err| setError(&model, err);
+                    continue;
+                }
+                if (model.mode == .issue_edit_title or model.mode == .issue_edit_body or model.mode == .issue_create_title or model.mode == .issue_create_body) {
+                    handleIssueInput(&model, key, &state) catch |err| setError(&model, err);
+                    continue;
+                }
+                if (model.mode == .issue_create_repository) {
+                    if (key.matches(vaxis.Key.escape, .{})) model.mode = .normal else if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+                        if (model.selected_repository + 1 < config.repositories.items.len) model.selected_repository += 1;
+                    } else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) model.selected_repository -|= 1 else if (key.matches(vaxis.Key.enter, .{}) and config.repositories.items.len != 0) model.beginInput(.issue_create_title, "");
+                    continue;
+                }
+                if (model.mode == .confirm_issue_edit or model.mode == .confirm_issue_create or model.mode == .confirm_issue_state) {
+                    handleIssueConfirmation(allocator, init.io, init.environ_map, &config, service, &model, &state, key) catch |err| setError(&model, err);
                     continue;
                 }
                 if (model.mode == .add or model.mode == .edit or model.mode == .task_reparent or model.mode == .search or model.mode == .proposal_add or model.mode == .proposal_edit or model.mode == .proposal_reparent) {
@@ -167,7 +188,7 @@ fn runFallible(init: std.process.Init) !void {
                     continue;
                 }
                 if (model.mode == .menu) {
-                    handleMenu(allocator, init.io, init.environ_map, service, &model, &state, key) catch |err| setError(&model, err);
+                    handleMenu(allocator, init.io, init.environ_map, service, &config, &model, &state, key) catch |err| setError(&model, err);
                     continue;
                 }
                 if (model.mode == .confirm_proposal_delete or model.mode == .confirm_proposal_approve or model.mode == .confirm_proposal_duplicates or model.mode == .confirm_proposal_discard) {
@@ -198,19 +219,26 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
     const detail_width: u16 = screen.width - left_width;
     const left = screen.child(.{ .width = left_width, .height = body_height, .border = .{ .where = .all } });
     const detail = screen.child(.{ .x_off = @intCast(left_width), .width = detail_width, .height = body_height, .border = .{ .where = .all } });
-    const footer = screen.child(.{ .y_off = @intCast(body_height), .height = 2 });
+    const footer = screen.child(.{ .y_off = @intCast(body_height), .width = screen.width, .height = 2 });
 
     _ = screen.printSegment(.{ .text = " Issues / Tasks " }, .{ .col_offset = 2, .wrap = .none });
     _ = screen.printSegment(.{ .text = " Details " }, .{ .col_offset = left_width + 2, .wrap = .none });
+    const heights = allocator.alloc(usize, rows.len) catch return;
+    for (rows, 0..) |tree_row, index| {
+        const line = treeRowText(allocator, state, &model, tree_row) catch {
+            heights[index] = 1;
+            continue;
+        };
+        heights[index] = treeLineHeight(left, line);
+    }
+    const content_height: usize = @max(@as(usize, 1), left.height -| 2);
+    const offset = layout.viewportStart(heights, model.selected, content_height);
     var row: u16 = 1;
-    const visible: usize = @max(@as(usize, 1), left.height -| 3);
-    const offset = if (model.selected >= visible) model.selected - visible + 1 else 0;
     for (rows[offset..], offset..) |tree_row, index| {
-        if (row >= left.height) break;
+        if (row >= left.height -| 1) break;
         const line = treeRowText(allocator, state, &model, tree_row) catch continue;
         const style = treeRowStyle(state, tree_row, model.focus == .tree and index == model.selected);
-        const printed = left.printSegment(.{ .text = line, .style = style }, .{ .row_offset = row, .wrap = .grapheme });
-        row = printed.row +| 1;
+        row = drawTreeLine(left, line, style, row);
     }
 
     drawDetails(allocator, detail, state, rows, model.selected, model.detail_scroll);
@@ -237,8 +265,16 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
         .confirm_proposal_approve => "APPROVE  y:Taskへ追加 Esc:取消",
         .confirm_proposal_duplicates => "DUPLICATES  重複候補があります y:それでも追加 Esc:取消",
         .confirm_proposal_discard => "DISCARD  y:Draft破棄 Esc:取消",
+        .issue_edit_title => "ISSUE EDIT  Title Enter:次へ Esc:取消",
+        .issue_edit_body => "ISSUE EDIT  Body Enter:確認 Esc:取消",
+        .issue_create_title => "ISSUE CREATE  Title Enter:次へ Esc:取消",
+        .issue_create_body => "ISSUE CREATE  Body Enter:確認 Esc:取消",
+        .issue_create_repository => "ISSUE CREATE  Repositoryを選択 Enter:次へ Esc:取消",
+        .confirm_issue_edit => "ISSUE EDIT  y:更新 Esc:取消",
+        .confirm_issue_create => "ISSUE CREATE  y:作成 Esc:取消",
+        .confirm_issue_state => "ISSUE STATE  y:変更 Esc:取消",
     };
-    _ = footer.printSegment(.{ .text = footer_text }, .{ .row_offset = 1, .wrap = .none });
+    drawFooter(footer, footer_text);
 
     if (model.mode == .add or model.mode == .edit) drawDialog(screen, "Task title", model.inputSlice());
     if (model.mode == .task_reparent) drawDialog(screen, "Move Task", model.inputSlice());
@@ -275,11 +311,59 @@ fn draw(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, state: *const @import(".
     if (model.mode == .confirm_proposal_approve) drawDialog(screen, "ProposalをTaskへ追加します", "y: confirm / Esc: cancel");
     if (model.mode == .confirm_proposal_duplicates) drawDialog(screen, "同一タイトルのTaskが存在します", "y: add anyway / Esc: cancel");
     if (model.mode == .confirm_proposal_discard) drawDialog(screen, "Proposalを破棄します", "y: confirm / Esc: cancel");
+    if (model.mode == .issue_edit_title or model.mode == .issue_create_title) drawDialog(screen, "Issue title", model.inputSlice());
+    if (model.mode == .issue_edit_body or model.mode == .issue_create_body) drawDialog(screen, "Issue body", model.inputSlice());
+    if (model.mode == .confirm_issue_edit) drawDialog(screen, "Issueを更新します", "y: confirm / Esc: cancel");
+    if (model.mode == .confirm_issue_create) drawDialog(screen, "Issueを作成します", "y: confirm / Esc: cancel");
+    if (model.mode == .confirm_issue_state) drawDialog(screen, "Issue状態を変更します", "y: confirm / Esc: cancel");
+    if (model.mode == .issue_create_repository) drawIssueRepositories(allocator, screen, config, model);
     if (model.mode == .help) drawDialog(screen, "Help", "Tab: focus  j/k: select  Space: toggle  a/e/R/d: task  m: menu  q: quit");
     if (model.mode == .menu) drawMenu(screen, model);
     if (model.mode == .proposal) drawProposal(allocator, screen, state, model);
     if (model.mode == .proposal_running) drawDialog(screen, "Generating proposal…", "fx実行中です。Escで中断します");
     if (model.mode == .repositories) drawRepositories(allocator, screen, config, model);
+}
+
+fn drawFooter(footer: vaxis.Window, text: []const u8) void {
+    // Mode changes often replace a long Japanese usage string with a shorter
+    // one. Explicitly reset both footer rows so stale wide-character cells do
+    // not survive Vaxis' differential rendering.
+    footer.fill(.{ .default = true });
+    const safe_width = layout.safeContentWidth(footer.width);
+    if (safe_width == 0 or footer.height == 0) return;
+    const line = footer.child(.{ .y_off = @intCast(footer.height - 1), .width = safe_width, .height = 1 });
+    _ = line.printSegment(.{ .text = text, .style = .{} }, .{ .wrap = .none });
+}
+
+fn drawTreeLine(window: vaxis.Window, line: []const u8, style: vaxis.Style, row: u16) u16 {
+    return projectTreeLine(window, line, style, row, true);
+}
+
+fn treeLineHeight(window: vaxis.Window, line: []const u8) usize {
+    return @max(@as(usize, 1), projectTreeLine(window, line, .{}, 0, false));
+}
+
+fn projectTreeLine(window: vaxis.Window, line: []const u8, style: vaxis.Style, row: u16, commit: bool) u16 {
+    // Keep one spare cell so a two-cell-wide grapheme never occupies the
+    // terminal cell used by the right border.
+    const safe_width = layout.safeContentWidth(window.width);
+    if (safe_width == 0) return row +| 1;
+    const safe = window.child(.{ .width = safe_width });
+    const title_start = layout.titleStart(line);
+    if (title_start == 0) {
+        const printed = safe.printSegment(.{ .text = line, .style = style }, .{ .row_offset = row, .wrap = .grapheme, .commit = commit });
+        return printed.row +| 1;
+    }
+    const prefix = line[0..title_start];
+    const prefix_width = safe.gwidth(prefix);
+    if (prefix_width >= safe.width) {
+        const printed = safe.printSegment(.{ .text = line, .style = style }, .{ .row_offset = row, .wrap = .grapheme, .commit = commit });
+        return printed.row +| 1;
+    }
+    _ = safe.printSegment(.{ .text = prefix, .style = style }, .{ .row_offset = row, .wrap = .none, .commit = commit });
+    const title = safe.child(.{ .x_off = @intCast(prefix_width), .width = safe.width - prefix_width });
+    const printed = title.printSegment(.{ .text = line[title_start..], .style = style }, .{ .row_offset = row, .wrap = .grapheme, .commit = commit });
+    return printed.row +| 1;
 }
 
 fn drawDialog(screen: vaxis.Window, title: []const u8, body: []const u8) void {
@@ -294,23 +378,37 @@ fn drawMenu(screen: vaxis.Window, model: Model) void {
     const width: u16 = @min(64, screen.width -| 4);
     const menu = screen.child(.{ .x_off = @intCast((screen.width - width) / 2), .y_off = 2, .width = width, .height = @min(14, screen.height -| 4), .border = .{ .where = .all } });
     menu.fill(.{ .default = true });
-    _ = menu.printSegment(.{ .text = " Proposal   Repositories   Issues ", .style = .{ .bold = true } }, .{ .row_offset = 0, .col_offset = 1, .wrap = .none });
+    const tabs = [_]struct { label: []const u8, tab: Model.MenuTab }{
+        .{ .label = " Proposal ", .tab = .proposal },
+        .{ .label = " Repositories ", .tab = .repositories },
+        .{ .label = " Issues ", .tab = .issues },
+    };
+    var tab_col: u16 = 1;
+    for (tabs) |tab| {
+        const active = tab.tab == model.menu_tab;
+        _ = menu.printSegment(.{ .text = tab.label, .style = .{ .bold = true, .reverse = active } }, .{ .row_offset = 0, .col_offset = tab_col, .wrap = .none });
+        tab_col += menu.gwidth(tab.label) + 1;
+    }
     const items: []const []const u8 = switch (model.menu_tab) {
         .proposal => &.{"Proposalを開く"},
         .repositories => &.{"Repository管理を開く"},
-        .issues => &.{ "Issue詳細", "Issueを更新", "GitHubで開く", if (model.show_closed) "Closed Issueを隠す" else "Closed Issueを表示" },
+        .issues => &.{ "Issue詳細", "Issue一覧を更新", "GitHubで開く", "Issueを編集", "Issueを作成", "Close / Reopen", if (model.show_closed) "Closed Issueを隠す" else "Closed Issueを表示" },
     };
-    for (items, 0..) |item, index| _ = menu.printSegment(.{ .text = item, .style = if (index == model.menu_selected) .{ .reverse = true } else .{} }, .{ .row_offset = @intCast(index + 2), .col_offset = 2, .wrap = .grapheme });
+    for (items, 0..) |item, index| {
+        const marker = if (index == model.menu_selected) "▶ " else "  ";
+        _ = menu.printSegment(.{ .text = marker, .style = .{ .bold = true } }, .{ .row_offset = @intCast(index + 2), .col_offset = 2, .wrap = .none });
+        _ = menu.printSegment(.{ .text = item, .style = if (index == model.menu_selected) .{ .bold = true, .reverse = true } else .{} }, .{ .row_offset = @intCast(index + 2), .col_offset = 4, .wrap = .grapheme });
+    }
 }
 
 fn menuItemCount(tab: Model.MenuTab) usize {
     return switch (tab) {
         .proposal, .repositories => 1,
-        .issues => 4,
+        .issues => 7,
     };
 }
 
-fn handleMenu(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, service: Service, model: *Model, state: *@import("../core/state.zig").StateRoot, key: vaxis.Key) !void {
+fn handleMenu(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, service: Service, config: *const config_mod.Config, model: *Model, state: *@import("../core/state.zig").StateRoot, key: vaxis.Key) !void {
     if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{})) {
         model.mode = .normal;
         return;
@@ -352,12 +450,33 @@ fn handleMenu(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.
                 model.mode = .normal;
             },
             3 => {
+                const key_issue = selectedIssue(state, model.selected_issue) orelse return error.IssueNotFound;
+                const snap = findIssue(state, key_issue) orelse return error.IssueNotFound;
+                model.beginInput(.issue_edit_title, snap.title);
+            },
+            4 => {
+                if (config.repositories.items.len == 0) return error.RepositoryNotFound;
+                model.selected_repository = @min(model.selected_repository, config.repositories.items.len - 1);
+                model.mode = .issue_create_repository;
+            },
+            5 => model.mode = .confirm_issue_state,
+            6 => {
                 model.show_closed = !model.show_closed;
                 model.selected = 0;
                 model.mode = .normal;
             },
             else => {},
         },
+    }
+}
+
+fn drawIssueRepositories(allocator: std.mem.Allocator, screen: vaxis.Window, config: *const config_mod.Config, model: Model) void {
+    const dialog = screen.child(.{ .x_off = 2, .y_off = 1, .width = screen.width -| 4, .height = screen.height -| 3, .border = .{ .where = .all } });
+    dialog.fill(.{ .default = true });
+    _ = dialog.printSegment(.{ .text = "Create Issue: Repository", .style = .{ .bold = true } }, .{ .col_offset = 1 });
+    for (config.repositories.items, 0..) |repository, index| {
+        const line = std.fmt.allocPrint(allocator, "{s}  {s}", .{ repository.repository, repository.workspace_path }) catch continue;
+        _ = dialog.printSegment(.{ .text = line, .style = if (index == model.selected_repository) .{ .reverse = true } else .{} }, .{ .row_offset = @intCast(index + 2), .col_offset = 1, .wrap = .none });
     }
 }
 
@@ -509,6 +628,75 @@ fn handleTreeKey(model: *Model, key: vaxis.Key, state: *@import("../core/state.z
 
 fn handleDetailKey(model: *Model, key: vaxis.Key) void {
     if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) model.detail_scroll += 1 else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) model.detail_scroll -|= 1 else if (key.matches('g', .{})) model.detail_scroll = 0 else if (key.matches('G', .{})) model.detail_scroll = std.math.maxInt(usize);
+}
+
+fn handleIssueInput(model: *Model, key: vaxis.Key, state: *const state_mod.StateRoot) !void {
+    if (key.matches(vaxis.Key.escape, .{})) {
+        model.mode = .normal;
+        model.input_len = 0;
+        return;
+    }
+    if (key.matches(vaxis.Key.backspace, .{})) return model.backspace();
+    if (key.matches(vaxis.Key.enter, .{})) {
+        const value = std.mem.trim(u8, model.inputSlice(), " \t\r\n");
+        switch (model.mode) {
+            .issue_edit_title, .issue_create_title => {
+                if (value.len == 0) return error.EmptyTitle;
+                model.issue_draft_title_len = @min(value.len, model.issue_draft_title.len);
+                @memcpy(model.issue_draft_title[0..model.issue_draft_title_len], value[0..model.issue_draft_title_len]);
+                if (model.mode == .issue_edit_title) {
+                    const issue_key = selectedIssue(state, model.selected_issue) orelse return error.IssueNotFound;
+                    const issue = findIssue(state, issue_key) orelse return error.IssueNotFound;
+                    model.beginInput(.issue_edit_body, issue.body);
+                } else model.beginInput(.issue_create_body, "");
+            },
+            .issue_edit_body => model.mode = .confirm_issue_edit,
+            .issue_create_body => model.mode = .confirm_issue_create,
+            else => {},
+        }
+        return;
+    }
+    if (key.text) |input| model.appendInput(input);
+}
+
+fn handleIssueConfirmation(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, config: *const config_mod.Config, service: Service, model: *Model, state: *state_mod.StateRoot, key: vaxis.Key) !void {
+    if (key.matches(vaxis.Key.escape, .{})) {
+        model.mode = .normal;
+        return;
+    }
+    if (!key.matches('y', .{})) return;
+    const selected = selectedIssue(state, model.selected_issue);
+    const repository = if (model.mode == .confirm_issue_create) blk: {
+        if (model.selected_repository >= config.repositories.items.len) return error.RepositoryNotFound;
+        break :blk config.repositories.items[model.selected_repository].repository;
+    } else (selected orelse return error.IssueNotFound).repository;
+    var number_buffer: [32]u8 = undefined;
+    const number = if (selected) |issue| try std.fmt.bufPrint(&number_buffer, "{d}", .{issue.issue_number}) else "";
+    switch (model.mode) {
+        .confirm_issue_edit => try gh.edit(io, allocator, env, repository, number, model.issue_draft_title[0..model.issue_draft_title_len], model.inputSlice()),
+        .confirm_issue_create => try gh.create(io, allocator, env, repository, model.issue_draft_title[0..model.issue_draft_title_len], model.inputSlice()),
+        .confirm_issue_state => {
+            const snapshot_issue = findIssue(state, selected orelse return error.IssueNotFound) orelse return error.IssueNotFound;
+            try gh.setClosed(io, allocator, env, repository, number, snapshot_issue.status != .closed);
+        },
+        else => return,
+    }
+    var remote = gh.list(allocator, io, env, repository) catch {
+        model.setMessage("GitHubの変更は成功しましたが、再同期に失敗しました");
+        model.mode = .normal;
+        return;
+    };
+    defer remote.deinit();
+    try issue_adapter.merge(allocator, state, repository, remote.value, @intCast(std.Io.Clock.real.now(io).toSeconds()));
+    service.persistOrRollback(state) catch {
+        model.setMessage("GitHubの変更は成功しましたが、ローカル保存に失敗しました。Issue一覧を更新してください");
+        model.mode = .normal;
+        return;
+    };
+    model.selection_restored = false;
+    model.input_len = 0;
+    model.mode = .normal;
+    model.setMessage("GitHub Issueを更新しました");
 }
 
 fn applyTaskDestination(service: Service, state: *@import("../core/state.zig").StateRoot, id: u64, input: []const u8) !void {
@@ -668,6 +856,7 @@ fn handleProposal(allocator: std.mem.Allocator, io: std.Io, env: *const std.proc
         defer remote.deinit();
         try issue_adapter.merge(allocator, state, issue_key.repository, remote.value, @intCast(std.Io.Clock.real.now(io).toSeconds()));
         try service.persistOrRollback(state);
+        model.selection_restored = false;
         model.setMessage("Issueを更新しました");
     }
 }
@@ -719,6 +908,7 @@ fn refreshSelectedIssue(allocator: std.mem.Allocator, io: std.Io, env: *const st
     defer remote.deinit();
     try issue_adapter.merge(allocator, state, issue.repository, remote.value, std.Io.Clock.real.now(io).toSeconds());
     try service.persistOrRollback(state);
+    model.selection_restored = false;
     model.setMessage("Issueを更新しました");
 }
 
@@ -809,17 +999,52 @@ fn selectedTreeTask(rows: []const TreeRow, index: usize) ?u64 {
 fn syncSelection(model: *Model, state: *const @import("../core/state.zig").StateRoot, rows: []const TreeRow) void {
     if (model.selected >= rows.len) return;
     switch (rows[model.selected]) {
-        .issue => |index| model.selected_issue = index,
-        .unlinked => model.selected_issue = state.issues.items.len,
+        .issue => |index| {
+            model.selected_issue = index;
+            model.selected_issue_token = issueToken(state.issues.items[index].key);
+            model.selected_task = null;
+            model.selected_unlinked = false;
+        },
+        .unlinked => {
+            model.selected_issue = state.issues.items.len;
+            model.selected_issue_token = null;
+            model.selected_task = null;
+            model.selected_unlinked = true;
+        },
         .task => |row| if (findTask(state, row.id)) |item| {
+            model.selected_task = row.id;
+            model.selected_unlinked = false;
             if (item.issue_key) |key| {
+                model.selected_issue_token = issueToken(key);
                 for (state.issues.items, 0..) |issue, index| if (issue.key.eql(key)) {
                     model.selected_issue = index;
                     break;
                 };
-            } else model.selected_issue = state.issues.items.len;
+            } else {
+                model.selected_issue = state.issues.items.len;
+                model.selected_issue_token = null;
+            }
         },
     }
+}
+
+fn restoreSelection(model: *Model, state: *const @import("../core/state.zig").StateRoot, rows: []const TreeRow) void {
+    defer model.selection_restored = true;
+    for (rows, 0..) |row, index| switch (row) {
+        .issue => |issue_index| if (model.selected_issue_token != null and model.selected_issue_token.? == issueToken(state.issues.items[issue_index].key)) {
+            model.selected = index;
+            return;
+        },
+        .task => |task_row| if (model.selected_task == task_row.id) {
+            model.selected = index;
+            return;
+        },
+        .unlinked => if (model.selected_unlinked) {
+            model.selected = index;
+            return;
+        },
+    };
+    model.selected = 0;
 }
 
 fn hasChildren(state: *const @import("../core/state.zig").StateRoot, id: u64) bool {
@@ -860,6 +1085,7 @@ fn treePrefix(allocator: std.mem.Allocator, state: *const @import("../core/state
     }
 
     var prefix: std.ArrayList(u8) = .empty;
+    try prefix.append(allocator, ' ');
     for (chain, 0..) |id, level| {
         const node = findTask(state, id) orelse continue;
         const last = isLastSibling(state, node);
@@ -900,21 +1126,14 @@ fn drawDetails(allocator: std.mem.Allocator, detail: vaxis.Window, state: *const
         .unlinked => unlinkedDetails(allocator, state) catch return,
         .task => |row| taskDetails(allocator, state, row.id) catch return,
     };
-    var visible = text;
-    var line_count: usize = 0;
-    for (text) |byte| if (byte == '\n') {
-        line_count += 1;
-    };
-    const effective_scroll = @min(scroll, line_count);
-    var skipped: usize = 0;
-    while (skipped < effective_scroll) : (skipped += 1) {
-        const newline = std.mem.indexOfScalar(u8, visible, '\n') orelse {
-            visible = "";
-            break;
-        };
-        visible = visible[newline + 1 ..];
-    }
-    _ = detail.printSegment(.{ .text = visible }, .{ .row_offset = 1, .col_offset = 1, .wrap = .grapheme });
+    const content = detail.child(.{ .x_off = 1, .width = detail.width -| 2 });
+    const measured = content.printSegment(.{ .text = text }, .{ .wrap = .grapheme, .commit = false });
+    const total_rows: usize = @as(usize, measured.row) + 1;
+    const viewport_rows: usize = content.height;
+    const max_scroll = total_rows -| viewport_rows;
+    const effective_scroll: u16 = @intCast(@min(scroll, max_scroll));
+    const scrolled = content.child(.{ .y_off = -@as(i17, @intCast(effective_scroll)), .height = @intCast(@as(usize, content.height) + effective_scroll) });
+    _ = scrolled.printSegment(.{ .text = text }, .{ .wrap = .grapheme });
 }
 
 fn issueDetails(allocator: std.mem.Allocator, state: *const @import("../core/state.zig").StateRoot, index: usize) ![]const u8 {
@@ -995,6 +1214,11 @@ fn findTask(state: *const @import("../core/state.zig").StateRoot, id: u64) ?@imp
     return null;
 }
 
+fn findIssue(state: *const state_mod.StateRoot, key: task_mod.IssueKey) ?*const task_mod.IssueSnapshot {
+    for (state.issues.items) |*issue| if (issue.key.eql(key)) return issue;
+    return null;
+}
+
 test {
     std.testing.refAllDecls(@This());
 }
@@ -1045,13 +1269,13 @@ test "tree starts folded and expands issue and child task one level at a time" {
     const sibling = try state.addTask("sibling", .{ .repository = "a/b", .issue_number = 1 }, null);
     const root_prefix = try treePrefix(a, &state, findTask(&state, root).?, 1);
     defer a.free(root_prefix);
-    try std.testing.expectEqualStrings("├─", root_prefix);
+    try std.testing.expectEqualStrings(" ├─", root_prefix);
     const child_prefix = try treePrefix(a, &state, findTask(&state, child).?, 2);
     defer a.free(child_prefix);
-    try std.testing.expectEqualStrings("│ └─", child_prefix);
+    try std.testing.expectEqualStrings(" │ └─", child_prefix);
     const sibling_prefix = try treePrefix(a, &state, findTask(&state, sibling).?, 1);
     defer a.free(sibling_prefix);
-    try std.testing.expectEqualStrings("└─", sibling_prefix);
+    try std.testing.expectEqualStrings(" └─", sibling_prefix);
 }
 
 test "mouse selects panes rows and scrolls" {
@@ -1102,6 +1326,15 @@ test "details scroll independently" {
     try std.testing.expectEqual(@as(usize, 0), model.detail_scroll);
 }
 
+test "wrapped tree titles use a hanging indent after metadata" {
+    const task_line = "│ └─ [ ] 12: とても長い日本語Task";
+    const task_start = layout.titleStart(task_line);
+    try std.testing.expectEqualStrings("とても長い日本語Task", task_line[task_start..]);
+    const issue_line = "▸ a/b#1 [open] とても長いIssue";
+    const issue_start = layout.titleStart(issue_line);
+    try std.testing.expectEqualStrings("とても長いIssue", issue_line[issue_start..]);
+}
+
 test "task destination supports parent issue root and unlinked" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1125,6 +1358,26 @@ test "task destination supports parent issue root and unlinked" {
     try std.testing.expect(findTask(&state, child).?.issue_key.?.eql(.{ .repository = "a/b", .issue_number = 2 }));
     try applyTaskDestination(service, &state, child, "unlinked");
     try std.testing.expect(findTask(&state, child).?.issue_key == null);
+}
+
+test "adding while a task is selected creates a direct child" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const a = std.testing.allocator;
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(base);
+    const path = try std.fs.path.join(a, &.{ base, "state.json" });
+    defer a.free(path);
+    var state = @import("../core/state.zig").StateRoot.init(a);
+    defer state.deinit();
+    const parent = try state.addTask("parent", null, null);
+    var model: Model = .{};
+    defer model.deinit(a);
+    model.beginInput(.add, "child");
+    const service = Service{ .allocator = a, .io = std.testing.io, .state_path = path };
+    try handleInput(&model, .{ .codepoint = vaxis.Key.enter }, &state, parent, service);
+    try std.testing.expectEqual(@as(usize, 2), state.tasks.items.len);
+    try std.testing.expectEqual(@as(?u64, parent), state.tasks.items[1].parent_id);
 }
 
 test "delete impact counts direct children and complete subtree" {
